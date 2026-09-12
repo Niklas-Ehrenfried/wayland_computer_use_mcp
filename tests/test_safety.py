@@ -104,7 +104,11 @@ def test_user_physical_input_preemption(monkeypatch):
     manager.check_preemption(max_wait=0.5)  # Passes after pause cleared
 
 
-def test_new_tools_execution():
+def test_new_tools_execution(monkeypatch):
+    from wayland_computer_use_mcp.config import get_config
+
+    monkeypatch.setattr(get_config(), "mock_mode", True)
+
     # Test double click
     dc_res = double_click(100, 100, button="left")
     assert "Double-clicked" in dc_res
@@ -143,3 +147,46 @@ def test_new_tools_execution():
 
     foc = focus_window(pid=123)
     assert foc["pid"] == 123
+
+
+def test_strict_window_confinement_and_app_presence(monkeypatch):
+    """Enforces that if an app is not open/responsive or window is missing, actions fail."""
+    from wayland_computer_use_mcp.config import get_config
+    from wayland_computer_use_mcp.portal import global_portal_session
+
+    # Force live checks
+    monkeypatch.setattr(get_config(), "mock_mode", False)
+    monkeypatch.setattr(global_portal_session, "_is_mock", False)
+    monkeypatch.setattr(global_portal_session, "pipewire_node_id", 42)
+    monkeypatch.setattr(global_portal_session, "_initialized", True)
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+
+    # 1. No app open -> fail immediately
+    global_portal_session.target_pid = None
+    with pytest.raises(RuntimeError, match="No active managed application"):
+        global_portal_session.dispatch_click(50, 50)
+
+    # 2. Dead / non-existent PID -> fail immediately
+    global_portal_session.target_pid = 9999999
+    with pytest.raises(RuntimeError, match="is not running or responsive"):
+        global_portal_session.dispatch_click(50, 50)
+
+    # 3. PID responsive but window not found -> fail immediately
+    monkeypatch.setattr("wayland_computer_use_mcp.process.is_responsive", lambda pid: True)
+    monkeypatch.setattr(
+        "wayland_computer_use_mcp.compositors.query_window_geometry", lambda **kwargs: None
+    )
+    monkeypatch.setattr("wayland_computer_use_mcp.a11y.get_application_tree", lambda pid: {})
+    with pytest.raises(RuntimeError, match="is not open, visible, or mapped"):
+        global_portal_session.dispatch_click(50, 50)
+
+    # 4. App window open (e.g. 500x400) but click is out of bounds -> fail immediately
+    from wayland_computer_use_mcp.security import global_geometry_detector
+
+    global_geometry_detector.record_capture(500, 400, 100, 100)
+    monkeypatch.setattr(
+        "wayland_computer_use_mcp.compositors.query_window_geometry",
+        lambda **kwargs: (100, 100, 500, 400),
+    )
+    with pytest.raises(ValueError, match="out of window bounds"):
+        global_portal_session.dispatch_click(600, 200)

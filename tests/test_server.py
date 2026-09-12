@@ -12,14 +12,15 @@ from wayland_computer_use_mcp.server import (
 
 
 async def test_registered_tools():
-    tool_names = [
+    # Active high-leverage exposed MCP tools
+    exposed_tool_names = [
         "launch_app",
-        "restart_app",
         "terminate_app",
         "get_app_logs",
-        "check_app_liveness",
         "capture_window_frame",
         "inspect_ui_tree",
+        "interact_with_node",
+        "batch_actions",
         "click",
         "double_click",
         "right_click",
@@ -28,23 +29,37 @@ async def test_registered_tools():
         "scroll",
         "type_text",
         "key_combination",
-        "click_element_by_label",
         "take_labeled_screenshot",
         "clipboard_read",
         "clipboard_write",
-        "get_window_geometry",
         "install_to_desktop",
         "uninstall_from_desktop",
+        "window_control",
     ]
 
     tools = await mcp.list_tools()
     registered_names = {t.name for t in tools}
 
-    for name in tool_names:
-        assert name in registered_names
+    for name in exposed_tool_names:
+        assert name in registered_names, f"Expected tool '{name}' to be registered"
+
+    # Retired / consolidated tools should not pollute the exposed MCP surface
+    retired_tools = [
+        "restart_app",
+        "check_app_liveness",
+        "click_element_by_label",
+        "get_window_geometry",
+        "focus_window",
+    ]
+    for name in retired_tools:
+        assert name not in registered_names, f"Tool '{name}' should be consolidated/internal"
 
 
-def test_server_capture_and_input():
+def test_server_capture_and_input(monkeypatch):
+    from wayland_computer_use_mcp.config import get_config
+
+    monkeypatch.setattr(get_config(), "mock_mode", True)
+
     # Test capture
     img = capture_window_frame(crop_box=[10, 10, 100, 100])
     assert img is not None
@@ -79,10 +94,12 @@ def test_server_process_liveness():
 def test_active_app_protection(monkeypatch):
     import pytest
 
+    from wayland_computer_use_mcp.config import get_config
     from wayland_computer_use_mcp.portal import global_portal_session
 
     # Force live mode checks
     monkeypatch.setattr(global_portal_session, "_is_mock", False)
+    monkeypatch.setattr(get_config(), "mock_mode", False)
     monkeypatch.setattr(global_portal_session, "pipewire_node_id", 42)
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
     global_portal_session.target_pid = None

@@ -1,0 +1,88 @@
+"""Constants and role mappings for AT-SPI accessibility tree inspection."""
+
+from __future__ import annotations
+
+# Mapping from accessible role names to compact node ID prefixes
+ROLE_PREFIX_MAP: dict[str, str] = {
+    "push button": "b",
+    "button": "b",
+    "toggle button": "b",
+    "entry": "e",
+    "text": "e",
+    "text box": "e",
+    "search box": "e",
+    "password text": "e",
+    "combo box": "c",
+    "combobox": "c",
+    "dropdown": "c",
+    "drop down": "c",
+    "scale": "s",
+    "slider": "s",
+    "page tab": "t",
+    "tab": "t",
+    "check box": "k",
+    "checkbox": "k",
+    "check button": "k",
+    "checkbutton": "k",
+    "radio button": "r",
+    "radiobutton": "r",
+    "check menu item": "k",
+    "menu item": "m",
+    "menu": "m",
+    "link": "l",
+    "label": "lbl",
+    "static": "lbl",
+    "spin button": "sb",
+    "spinbutton": "sb",
+    "scroll bar": "scr",
+    "scrollbar": "scr",
+}
+
+INTERACTIVE_ROLES: set[str] = {
+    "push button",
+    "pushbutton",
+    "button",
+    "toggle button",
+    "togglebutton",
+    "entry",
+    "text",
+    "text box",
+    "search box",
+    "password text",
+    "combo box",
+    "combobox",
+    "dropdown",
+    "drop down",
+    "scale",
+    "slider",
+    "page tab",
+    "tab",
+    "check box",
+    "checkbox",
+    "check button",
+    "checkbutton",
+    "radio button",
+    "radiobutton",
+    "check menu item",
+    "menu item",
+    "menu",
+    "link",
+    "spin button",
+    "spinbutton",
+}
+
+CONTAINER_ROLES: set[str] = {
+    "panel",
+    "filler",
+    "section",
+    "container",
+    "viewport",
+    "grouping",
+    "unknown",
+    "redundant object",
+    "embedded",
+}
+
+IGNORED_ROLES: set[str] = {
+    "separator",
+}

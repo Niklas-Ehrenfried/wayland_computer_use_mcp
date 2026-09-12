@@ -43,3 +43,6 @@ htmlcov/
 *.log
 .cache/
 .agents/artifacts/
+
+# UV
+uv.lock

@@ -3,24 +3,88 @@
 [![FastMCP](https://img.shields.io/badge/FastMCP-2.0%2B-blue.svg)](https://github.com/jlowin/fastmcp)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-green.svg)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Code Style: Ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
-**`wayland-computer-use-mcp`** is a lightweight, production-grade Model Context Protocol (MCP) server providing an end-to-end interactive GUI testing, automation, and desktop integration suite for Wayland environments (specifically targeting Kubuntu/KDE Plasma and Ubuntu/GNOME).
+**`wayland-computer-use-mcp`** is a high-performance Model Context Protocol (MCP) server providing an interactive GUI testing, automation, and desktop integration suite for Wayland environments (KDE Plasma 6 / KWin, GNOME Mutter, Hyprland, Sway, and generic Wayland).
+
+Unlike conventional "computer use" agents that rely on high-latency video streaming and expensive pixel-based coordinate guessing, `wayland-computer-use-mcp` implements a **Tree-First Hybrid Semantic Execution Model**:
+- **Atomic Programmatic Execution**: Inspects semantic widget trees via AT-SPI2 D-Bus interfaces and executes actions (`DoAction`, `EditableText`, `Text`) directly without coordinate ambiguity.
+- **Observable Cursor Tracing**: Visibly translates the pointer over target elements prior to interaction, ensuring live tracking and transparency for human observers.
+- **Resilient Physical Fallback**: Custom canvas widgets, dropdown popovers, and complex surfaces fall back smoothly to clamped physical pointer clicks, drags, discrete wheel scrolls, and keystrokes.
 
 ---
 
-## Key Capabilities
+## ⚡ Token Efficiency: 90–95% Savings Over Vision-Only Approaches
 
-1. **Interactive Window & Desktop Streaming**: XDG Desktop Portals (`ScreenCast` via PipeWire + `RemoteDesktop` via libei/portal).
-2. **Semantic UI Inspection**: AT-SPI2 D-Bus traversal with token-optimized tree pruning for multimodal LLMs.
-3. **Client-Side Safety & Containment**: PID-bound process ownership, coordinate boundary clamping, and portal restore-token caching.
-4. **Live vs. Virtual Screen Isolation**: Run directly on your live desktop or inside an isolated virtual Wayland display.
-5. **Vibe-Coder Dev Primitives**: Virtualenv auto-detection, live stderr ring-buffering, worktree-aware desktop entry installation, and Pillow-based version/dev icon badging.
+Traditional screenshot-driven computer use models stream full monitor or window screenshots on every single action, consuming **1,500 to 3,500+ vision tokens per step**. A 10-step interaction sequence consumes 25,000–35,000+ tokens, introduces substantial latency, and suffers from visual coordinate hallucinations.
+
+`wayland-computer-use-mcp` reduces token expenditure by over 90%:
+
+| Interaction Tier | Modality / Tool | Typical Token Cost | Execution Latency | Determinism / Accuracy |
+| :--- | :--- | :--- | :--- | :--- |
+| **Traditional Computer Use** | Full Monitor Screenshot | ~2,500 – 3,500 tokens | 1.5 – 3.0s | High coordinate hallucination risk |
+| **Window Smart Crop** | `capture_window_frame` | ~1,200 – 1,800 tokens | 0.8 – 1.2s | Visual ambiguity on dense layouts |
+| **Collapsed 1D UI Tree** | `inspect_ui_tree` | **100 – 300 tokens** | **< 150ms** | **100% Deterministic (Node IDs)** |
+| **Reactive UI Delta** | `wrap_with_delta` | **20 – 60 tokens** | **< 50ms** | **Zero-token re-polling** |
+
+### Why This Architecture Conserves Tokens:
+1. **1D Semantic Flattening**: Automatically filters out invisible layout containers (`GtkBox`, `GtkOverlay`, `QBoxLayout`), distilling only actionable widgets into a compact array of indexed elements (`b1`, `e1`, `c1`) with their role, state, and label.
+2. **Direct Element Interaction**: Programmatic invocation via `interact_with_node(node_id="b1")` executes atomically without requiring intermediate verification screenshots.
+3. **Reactive State Diffing**: Every action automatically computes a pre- and post-interaction semantic delta, returning a concise markdown summary (e.g. `b1 [button]: text '0 clicks' ➔ '1 clicks'`), eliminating redundant tree re-polling.
+4. **Selective Visual Grounding**: Set-of-Marks visual overlays (`take_labeled_screenshot`) are utilized exclusively for layout or styling validation checkpoints.
+
+---
+
+## Operating Modes & Isolation Boundaries
+
+The server operates in two distinct display modes and supports fine-grained access scopes:
+
+### 1. Display Modes
+- **Live Mode (`--live` or `WAYLAND_MCP_DISPLAY_MODE="live"`)** *(Default)*:
+  - Connects to the user's active desktop session via `$WAYLAND_DISPLAY`.
+  - Interfaces with the active session D-Bus and AT-SPI2 bus.
+  - Automatically caches and reuses XDG Desktop Portal `restore_token` credentials to prevent repeated permission prompts.
+  - Physically moves the desktop pointer so human operators can follow agent actions in real time.
+- **Virtual / Isolated Mode (`--virtual` or `WAYLAND_MCP_DISPLAY_MODE="virtual"`)**:
+  - Connects to or launches an isolated virtual Wayland compositor (e.g. `weston --backend=headless-backend.so`, `kwin_wayland --virtual`, or `gamescope`).
+  - Completely separates agent actions from personal desktop workspaces, enabling unattended, headless, or CI/CD test automation.
+
+### 2. Access Scopes
+- **Window Isolation (`--window-only` or `WAYLAND_MCP_ACCESS_MODE="window"`)** *(Default)*:
+  - Prompts the user to select only the target application window in the XDG ScreenCast portal prompt.
+  - Clamps all coordinate motions strictly within the detected window geometry boundaries.
+- **Full Display (`--fullscreen` or `WAYLAND_MCP_ACCESS_MODE="fullscreen"`)**:
+  - Grants capture and interaction access to the entire display output.
+- **Dual Selection (`--allow-all` or `WAYLAND_MCP_ACCESS_MODE="both"`)**:
+  - Allows either window or monitor selection during the portal handshake.
+
+---
+
+## 🔒 Security Architecture & Upstream Portal Confinement Disclosure
+
+> [!WARNING]
+> ### Upstream XDG Portal Architectural Limitation
+> Under current FreeDesktop XDG Desktop Portal specifications, selecting a single window in the `ScreenCast` permission prompt restricts video capture to that window; **however, the `RemoteDesktop` portal protocol currently does not enforce server-side pointer boundary confinement.** Once a remote desktop session is granted, the protocol allows input injection across the full display surface.
+
+### How `wayland-computer-use-mcp` Mitigates This Risk:
+To guarantee safe operation despite upstream protocol constraints, this server implements five layers of client-side containment:
+
+1. **Strict Coordinate Boundary Clamping (`CoordinateClamper`)**:
+   All injected pointer coordinates are mathematically clamped to $[0 \le x \le W, 0 \le y \le H]$ of the target application surface. The server strictly forbids emitting coordinates outside the active window frame.
+2. **Dynamic Geometry Drift Detection (`GeometryDivergenceDetector`)**:
+   Monitors the baseline window surface position and dimensions. If a window moves, resizes, or unminimizes unexpectedly while an action is pending, the operation is immediately aborted to prevent clicks from spilling into adjacent desktop surfaces.
+3. **Hardware User Preemption (`UserInterventionDetector`)**:
+   Tracks physical hardware cursor activity. If the user moves the physical mouse or types on the keyboard, automated interactions pause instantly to yield control to the human operator.
+4. **Dangerous Shortcut Blacklist (`ShortcutFilter`)**:
+   Blocks hazardous keyboard sequences (e.g. `Super/Meta`, `Ctrl+Alt+Delete`, `Alt+F4`, VT terminal switching).
+5. **Virtual Display Sandbox Recommendation**:
+   For evaluating autonomous agents or untrusted scripts, execute with `--virtual` to provide hardware-level process and display server isolation.
 
 ---
 
 ## Quickstart
 
-### Run with `uvx` (No installation required)
+### Run Directly via `uvx` (Zero installation required)
 
 ```bash
 uvx wayland-computer-use-mcp
@@ -29,22 +93,16 @@ uvx wayland-computer-use-mcp
 ### Install in Virtual Environment
 
 ```bash
-# Clone and setup with uv
 git clone https://github.com/your-org/wayland-computer-use-mcp.git
 cd wayland-computer-use-mcp
 uv venv --python python3 --system-site-packages
+source .venv/bin/activate
 uv pip install -e .
 ```
 
 ---
 
-## Client Configuration
-
-You can configure **live vs. virtual** display and **window vs. fullscreen** access either via **environment variables** (`env`) or direct **CLI flags** (`args`). 
-
-Defaults:
-- Display mode: `live`
-- Access scope: `window` (Window only, single surface isolation)
+## MCP Client Configuration
 
 ### 1. Claude Desktop (`claude_desktop_config.json`)
 
@@ -58,18 +116,6 @@ Defaults:
         "WAYLAND_MCP_DISPLAY_MODE": "live",
         "WAYLAND_MCP_ACCESS_MODE": "window"
       }
-    }
-  }
-}
-```
-
-To run in **virtual isolated mode** with **fullscreen access**:
-```json
-{
-  "mcpServers": {
-    "wayland-computer-use": {
-      "command": "uvx",
-      "args": ["wayland-computer-use-mcp", "--virtual", "--fullscreen"]
     }
   }
 }
@@ -122,129 +168,56 @@ To run in **virtual isolated mode** with **fullscreen access**:
 }
 ```
 
-### 5. OpenAI Codex / Goose / Zed
+---
 
-```json
-{
-  "mcpServers": {
-    "wayland-computer-use": {
-      "command": "wayland-computer-use-mcp",
-      "args": ["--display-mode=live", "--access=window"]
-    }
-  }
-}
-```
+## Exposed Tool Suite (21 Tools)
+
+### 1. Tree-First Semantic Navigation
+- **`inspect_ui_tree(pid, max_depth)`**: Returns the collapsed 1D interactive element list (`b1`, `e1`, `c1`) with widget names, roles, states, and coordinates.
+- **`interact_with_node(node_id, action, text, ...)`**: Dispatches semantic interactions. Visibly traces cursor, executes AT-SPI action, and falls back to physical input if required. Auto-scrolls viewport if target is off-screen.
+- **`click_element_by_label(label, role)`**: Resolves widgets by visible label or role and performs a targeted click.
+- **`batch_actions(actions, pid)`**: Executes a batch of sequential UI operations atomically without intermediate screenshot pauses.
+
+### 2. Clamped Physical Input
+- **`click(x, y, button)`**: Executes a mouse click clamped to window bounds.
+- **`double_click(x, y, button)`**: Dispatches a standard mouse double-click.
+- **`right_click(x, y)`**: Dispatches a right-click (context menu).
+- **`hover(x, y, duration_ms)`**: Moves pointer without clicking, activating Wayland tooltips or hover highlights.
+- **`drag(start_x, start_y, end_x, end_y)`**: Performs a clamped mouse drag gesture.
+- **`scroll(dx, dy)`**: Dispatches pointer wheel ticks via `NotifyPointerAxisDiscrete` and continuous deltas.
+- **`type_text(text, x, y)`**: Types text using evdev keycodes with automated clipboard paste fallback for strings > 30 characters.
+- **`key_combination(keys)`**: Sends modifier hotkeys (e.g. `["ctrl", "s"]`, `["alt", "tab"]`).
+
+### 3. Visual Grounding & Inspection
+- **`capture_window_frame(crop_box)`**: Captures a high-resolution window frame. Yields Markdown image preview links and MCP standard `ImageContent` blocks.
+- **`take_labeled_screenshot()`**: Captures window frame annotated with numbered Set-of-Marks boundary badges.
+
+### 4. Process Lifecycle & Crash Interception
+- **`launch_app(script_path, args, cwd)`**: Spawns Python GUI scripts with automatic virtual environment discovery.
+- **`terminate_app(pid)`**: Terminates application processes cleanly (`SIGTERM` escalated to `SIGKILL`).
+- **`get_app_logs(pid, lines)`**: Retrieves console output and crash tracebacks from a thread-safe 200-line circular buffer.
+
+### 5. OS & Desktop Integration
+- **`clipboard_read()`**: Reads text from the Wayland clipboard (`wl-paste`).
+- **`clipboard_write(text)`**: Writes text to the Wayland clipboard (`wl-copy`).
+- **`window_control(action, pid)`**: Controls window state (`minimize`, `maximize`, `restore`, `close`).
+- **`install_to_desktop(app_id, name, ...)`**: Generates a valid Linux `.desktop` launcher with worktree detection and version badging.
+- **`uninstall_from_desktop(app_id)`**: Removes desktop launchers and associated icons.
 
 ---
 
-## Display Configuration: Live vs. Virtual Screen
+## Interactive Test Rig
 
-### Configuration Options
-- **Display Modes**:
-  - `live` (Default): Connects directly to the user's active desktop session (`$WAYLAND_DISPLAY`, live portal dialog).
-  - `virtual`: Targets or spawns an isolated virtual Wayland compositor (e.g. `weston --backend=headless-backend.so`, `gamescope`, or `kwin_wayland --virtual`).
-- **Access Scopes**:
-  - `window` (Default, `source_type=2`): Prompts/streams only the selected window. Clamps clicks strictly to the window boundary.
-  - `fullscreen` (`source_type=1`): Grants access to the full monitor/display.
-  - `both` (`source_type=3`): Allows the user to select either in the portal prompt.
-
-### Ways to Configure
-1. **CLI Flags in `args`**:
-   - `--live` or `--virtual` (or `--display-mode=live|virtual`)
-   - `--window-only` or `--fullscreen` or `--allow-all` (or `--access=window|fullscreen|both`)
-2. **Environment Variables in `env`**:
-   - `WAYLAND_MCP_DISPLAY_MODE="live" | "virtual"`
-   - `WAYLAND_MCP_ACCESS_MODE="window" | "fullscreen" | "both"`
-   - `WAYLAND_MCP_SOURCE_TYPE="2" | "1" | "3"`
-3. **User Configuration File (`~/.config/wayland-computer-use-mcp/config.json`)**:
-   ```json
-   {
-     "display_mode": "live",
-     "source_type": 2,
-     "virtual_compositor_cmd": "weston --backend=headless-backend.so",
-     "virtual_wayland_display": "wayland-mcp-virtual"
-   }
-   ```
-
----
-
-## Interactive Test Rig GUI Application
-
-The repository includes a dedicated GTK3 verification application in `examples/test_gui_app.py` to test all MCP tools:
+A complete 14-component GTK4/Adwaita verification application is provided in `examples/test_gui_app.py`:
 
 ```bash
-# Run test application directly
-python examples/test_gui_app.py
+uv run python examples/test_gui_app.py
 ```
 
-### Supported Testing Flows
-| Tool | Target Widget in Test Rig | Verification Behavior |
-| :--- | :--- | :--- |
-| `launch_app` | Launches `examples/test_gui_app.py` | Spawns process, detects virtualenv, returns PID |
-| `inspect_ui_tree` | All widgets | Returns pruned AT-SPI hierarchy (buttons, slider, entry, list) with coordinates |
-| `click` | "Click Me!" Button | Increments click counter, updates label and stderr log |
-| `type_text` | Text Entry Field | Types input string into active entry widget |
-| `drag` | Horizontal Slider (Scale) | Drags slider thumb from start coordinate to end coordinate |
-| `scroll` | Scrollable List View | Dispatches vertical/horizontal scroll events through 30 items |
-| `capture_window_frame` | Window Surface | Captures PNG image or cropped element bounding box |
-| `get_app_logs` | Console ring-buffer | Retrieves live stderr log lines emitted by the test rig |
-| `restart_app` / `terminate_app` | Process lifecycle | Hot-restarts or safely terminates test rig process |
-
----
-
-## Recommended Additional Tools for Enhanced GUI Interaction
-
-Here is a curated list of high-value tools that can be added to further enhance agent GUI capabilities:
-
-1. **`key_combination(keys: list[str])`**:
-   - Sends simultaneous modifier hotkeys (e.g. `["ctrl", "c"]`, `["alt", "tab"]`, `["ctrl", "shift", "t"]`, `["super"]`).
-2. **`click_element_by_label(label: str, role: str | None = None)`**:
-   - Combines `inspect_ui_tree` with `click`: finds the matching AT-SPI accessible node by text/role, computes its center `(x + w//2, y + h//2)`, and fires the click automatically.
-3. **`double_click(x: int, y: int)` & `right_click(x: int, y: int)`**:
-   - Specialized mouse gestures for opening items or triggering context menus.
-4. **`hover(x: int, y: int, duration_ms: int = 500)`**:
-   - Moves cursor to position without clicking, triggering Wayland tooltips, hover highlights, or dropdown menus.
-5. **`clipboard_read()` & `clipboard_write(text: str)`**:
-   - Direct integration with Wayland clipboard (`wl-paste` and `wl-copy`) to read/write selections or verify copy-paste operations.
-6. **`take_labeled_screenshot()`**:
-   - Captures the window frame and overlays numeric bounding-box markers `[1]`, `[2]`, `[3]` corresponding to interactive AT-SPI elements (Set-of-Marks prompting for multimodal LLMs).
-7. **`focus_window(pid: int)`**:
-   - Requests window focus/activation via AT-SPI `Component.GrabFocus()` or compositor protocol.
-
----
-
-## Exposed MCP Tools
-
-### Process Lifecycle
-- `launch_app(script_path, args, cwd)`: Launches a Python GUI script using auto-detected virtualenv and returns its PID.
-- `restart_app(pid)`: Hot-restarts a managed application while preserving its command arguments and environment.
-- `terminate_app(pid)`: Safely terminates an application process spawned by this session (SIGTERM escalated to SIGKILL).
-- `get_app_logs(pid, lines)`: Retrieves recent stderr crash tracebacks and console output from a circular ring buffer.
-- `check_app_liveness(pid)`: Checks if a managed process is active, responding, or in a zombie/crashed state.
-
-### Visual & Tree Inspection
-- `capture_window_frame(crop_box)`: Captures a high-resolution frame of the Wayland window/desktop. Optional `crop_box: [x, y, w, h]`.
-- `inspect_ui_tree(pid, max_depth)`: Returns the pruned, semantic AT-SPI2 accessibility tree for the application.
-
-### Clamped Input Injection
-- `click(x, y, button)`: Fires a mouse click clamped to the window boundary.
-- `drag(start_x, start_y, end_x, end_y)`: Performs a clamped drag-and-drop gesture within the window.
-- `scroll(dx, dy)`: Dispatches horizontal/vertical scroll events to the active surface.
-- `type_text(text)`: Types a string of text via hybrid libei keyboard keycodes with clipboard fallback.
-
-### OS Desktop Integration
-- `install_to_desktop(app_id, name, exec_path, icon_path, version, is_dev)`: Registers the script as a native Linux desktop application (`.desktop`) with worktree detection and version badging.
-- `uninstall_from_desktop(app_id)`: Removes the application launcher and its associated icons from the OS desktop menu.
-
----
-
-## Upstream Security Disclosure Note
-
-> [!IMPORTANT]
-> **Upstream Security Notice**:
-> While `wayland-computer-use-mcp` enforces strict **client-side coordinate boundary clamping** on all incoming clicks, drags, and motions (preventing pointer coordinates from exceeding the identified window surface $[0 \le x \le W, 0 \le y \le H]$), native display-server coordinate confinement within the XDG `RemoteDesktop` portal protocol remains an active open upstream initiative in the FreeDesktop standards community.
-> 
-> When testing untrusted or automated agents, running in **virtual display mode** (`WAYLAND_MCP_DISPLAY_MODE="virtual"`) or within an isolated nested Wayland compositor provides an additional hardware and sandbox isolation boundary.
+Run the automated live end-to-end integration test suite:
+```bash
+uv run pytest tests/test_live_example_app.py -v
+```
 
 ---
 

@@ -235,3 +235,60 @@ def is_responsive(pid: int) -> bool:
             pass
 
     return True
+
+
+def get_recent_traceback(pid: int) -> str | None:
+    """Scans the ring buffer for standard Python traceback patterns."""
+    with _lock:
+        if pid not in _logs:
+            return None
+        entries = list(_logs[pid])
+
+    full_text = "\n".join(entries)
+    if "Traceback (most recent call last):" in full_text:
+        idx = full_text.rfind("Traceback (most recent call last):")
+        return full_text[idx:].strip()
+    return None
+
+
+def check_process_health_and_enrich(pid: int | None, result_text: str) -> str:
+    """Checks process health after an action and attaches traceback if detected.
+
+    - If the process terminated/crashed, raises RuntimeError with the formatted traceback.
+    - If the process is alive but emitted a traceback to stderr, appends an alert block.
+    """
+    if not pid:
+        return result_text
+
+    # Only check if PID is managed
+    with _lock:
+        is_managed = pid in _processes
+
+    if not is_managed:
+        return result_text
+
+    alive = is_responsive(pid)
+    tb = get_recent_traceback(pid)
+    if not tb:
+        for _ in range(5):
+            time.sleep(0.04)
+            tb = get_recent_traceback(pid)
+            if tb:
+                break
+
+    if not alive:
+        if tb:
+            raise RuntimeError(f"Application process (PID {pid}) crashed!\n\nTraceback:\n{tb}")
+        raise RuntimeError(f"Application process (PID {pid}) unexpectedly terminated or exited.")
+
+    if tb:
+        return (
+            f"{result_text}\n\n"
+            f"> [!WARNING]\n"
+            f"> Application emitted a Python exception to stderr:\n"
+            f"> ```python\n"
+            f"> {tb}\n"
+            f"> ```"
+        )
+
+    return result_text

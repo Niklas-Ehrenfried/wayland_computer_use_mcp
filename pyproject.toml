@@ -45,3 +45,33 @@ ignore = ["B008"]  # Allow FastMCP tool decorators and default arg patterns
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "live: live interactive tests that interact with the desktop session",
+    "unit: fast unit tests that run in background",
+]
+
+[tool.coverage.run]
+source = ["wayland_computer_use_mcp"]
+branch = true
+omit = [
+    "tests/*",
+    "examples/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+precision = 1
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]
+
+[dependency-groups]
+dev = [
+    "pytest-cov>=7.1.0",
+]
+

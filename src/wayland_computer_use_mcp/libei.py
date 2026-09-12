@@ -202,6 +202,14 @@ class LibEIWrapper:
         c.ei_device_scroll_delta.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_double]
         c.ei_device_scroll_delta.restype = None
 
+        if hasattr(c, "ei_device_scroll_discrete"):
+            c.ei_device_scroll_discrete.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_int32,
+                ctypes.c_int32,
+            ]
+            c.ei_device_scroll_discrete.restype = None
+
         c.ei_device_keyboard_key.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_bool]
         c.ei_device_keyboard_key.restype = None
 
@@ -238,13 +246,13 @@ class EIClient:
     EI_EVENT_DEVICE_RESUMED = 8
     EI_EVENT_KEYBOARD_KEYMAP = 9
 
-    # Device capabilities from libei.h (enum ei_device_capability)
-    EI_DEVICE_CAP_POINTER = 1
-    EI_DEVICE_CAP_POINTER_ABSOLUTE = 2
-    EI_DEVICE_CAP_BUTTON = 3
-    EI_DEVICE_CAP_SCROLL = 4
-    EI_DEVICE_CAP_KEYBOARD = 5
-    EI_DEVICE_CAP_TOUCH = 6
+    # Device capabilities from libei.h (enum ei_device_capability bitmasks)
+    EI_DEVICE_CAP_POINTER = 0x01
+    EI_DEVICE_CAP_POINTER_ABSOLUTE = 0x02
+    EI_DEVICE_CAP_KEYBOARD = 0x04
+    EI_DEVICE_CAP_TOUCH = 0x08
+    EI_DEVICE_CAP_SCROLL = 0x10
+    EI_DEVICE_CAP_BUTTON = 0x20
 
     def __init__(self, fd: int | None = None) -> None:
         self.fd = fd
@@ -256,10 +264,33 @@ class EIClient:
         self.button_device: Any = None
         self.scroll_device: Any = None
         self._connected = False
-        self._emulating = False
+        self._emulating_devices: set[Any] = set()
+        self._in_drag = False
 
         if fd is not None and libei.available:
             self._init_session(fd)
+
+    def _start_emulating(self, dev: Any) -> None:
+        """Ensures a device enters emulation mode before sending events."""
+        if not dev or not self.ctx or not libei.available:
+            return
+        if dev not in self._emulating_devices:
+            try:
+                libei._cdll.ei_device_start_emulating(dev, ctypes.c_uint32(0))
+                self._emulating_devices.add(dev)
+            except Exception as exc:
+                logger.debug("ei_device_start_emulating error: %s", exc)
+
+    def _stop_emulating(self, dev: Any) -> None:
+        """Stops emulation mode for a device."""
+        if not dev or not self.ctx or not libei.available:
+            return
+        if dev in self._emulating_devices:
+            try:
+                libei._cdll.ei_device_stop_emulating(dev)
+            except Exception as exc:
+                logger.debug("ei_device_stop_emulating error: %s", exc)
+            self._emulating_devices.discard(dev)
 
     def _init_session(self, fd: int) -> None:
         c = libei._cdll
@@ -367,10 +398,11 @@ class EIClient:
 
         if dev:
             t = self._get_time_now()
-            c.ei_device_start_emulating(dev, 0)
+            self._start_emulating(dev)
             c.ei_device_pointer_motion_absolute(dev, ctypes.c_double(x), ctypes.c_double(y))
             c.ei_device_frame(dev, t)
-            c.ei_device_stop_emulating(dev)
+            if not self._in_drag:
+                self._stop_emulating(dev)
 
     def pointer_motion(self, dx: float, dy: float) -> None:
         """Move cursor relatively by (dx, dy)."""
@@ -386,10 +418,11 @@ class EIClient:
 
         if dev:
             t = self._get_time_now()
-            c.ei_device_start_emulating(dev, 0)
+            self._start_emulating(dev)
             c.ei_device_pointer_motion(dev, ctypes.c_double(dx), ctypes.c_double(dy))
             c.ei_device_frame(dev, t)
-            c.ei_device_stop_emulating(dev)
+            if not self._in_drag:
+                self._stop_emulating(dev)
 
     def button_click(self, button_code: int = BTN_LEFT) -> None:
         """Perform a click (press and release) for specified button code."""
@@ -405,7 +438,7 @@ class EIClient:
 
         if dev:
             t1 = self._get_time_now()
-            c.ei_device_start_emulating(dev, 0)
+            self._start_emulating(dev)
             c.ei_device_button_button(dev, ctypes.c_uint32(button_code), True)
             c.ei_device_frame(dev, t1)
 
@@ -414,7 +447,7 @@ class EIClient:
             t2 = self._get_time_now()
             c.ei_device_button_button(dev, ctypes.c_uint32(button_code), False)
             c.ei_device_frame(dev, t2)
-            c.ei_device_stop_emulating(dev)
+            self._stop_emulating(dev)
 
     def button_down(self, button_code: int = BTN_LEFT) -> None:
         """Hold mouse button down (for dragging)."""
@@ -424,11 +457,16 @@ class EIClient:
 
         c = libei._cdll
         dev = self.button_device or self.pointer_abs_device or self.pointer_device
+        if not dev:
+            self.poll_events()
+            dev = self.button_device or self.pointer_abs_device or self.pointer_device
+
         if dev:
             t = self._get_time_now()
-            c.ei_device_start_emulating(dev, 0)
+            self._start_emulating(dev)
             c.ei_device_button_button(dev, ctypes.c_uint32(button_code), True)
             c.ei_device_frame(dev, t)
+            self._in_drag = True
 
     def button_up(self, button_code: int = BTN_LEFT) -> None:
         """Release mouse button."""
@@ -440,9 +478,14 @@ class EIClient:
         dev = self.button_device or self.pointer_abs_device or self.pointer_device
         if dev:
             t = self._get_time_now()
+            self._start_emulating(dev)
             c.ei_device_button_button(dev, ctypes.c_uint32(button_code), False)
             c.ei_device_frame(dev, t)
-            c.ei_device_stop_emulating(dev)
+            self._stop_emulating(dev)
+            self._in_drag = False
+            p_dev = self.pointer_abs_device or self.pointer_device
+            if p_dev:
+                self._stop_emulating(p_dev)
 
     def scroll(self, dx: float, dy: float) -> None:
         """Dispatch horizontal/vertical scroll deltas."""
@@ -451,13 +494,32 @@ class EIClient:
             return
 
         c = libei._cdll
-        dev = self.scroll_device or self.pointer_device
+        dev = self.scroll_device
+        if not dev:
+            self.poll_events()
+            dev = self.scroll_device
+
         if dev:
             t = self._get_time_now()
-            c.ei_device_start_emulating(dev, 0)
+            self._start_emulating(dev)
+            if hasattr(c, "ei_device_scroll_discrete"):
+                steps_y = (
+                    int(round(dy / 100.0))
+                    if abs(dy) >= 50
+                    else (1 if dy > 0 else -1 if dy < 0 else 0)
+                )
+                steps_x = (
+                    int(round(dx / 100.0))
+                    if abs(dx) >= 50
+                    else (1 if dx > 0 else -1 if dx < 0 else 0)
+                )
+                if steps_x != 0 or steps_y != 0:
+                    c.ei_device_scroll_discrete(
+                        dev, ctypes.c_int32(steps_x), ctypes.c_int32(steps_y)
+                    )
             c.ei_device_scroll_delta(dev, ctypes.c_double(dx), ctypes.c_double(dy))
             c.ei_device_frame(dev, t)
-            c.ei_device_stop_emulating(dev)
+            self._stop_emulating(dev)
 
     def key_press(self, keycode: int, is_down: bool) -> None:
         """Dispatch a single keyboard key down/up event."""
@@ -473,11 +535,11 @@ class EIClient:
 
         if dev:
             t = self._get_time_now()
-            c.ei_device_start_emulating(dev, 0)
+            self._start_emulating(dev)
             c.ei_device_keyboard_key(dev, ctypes.c_uint32(keycode), is_down)
             c.ei_device_frame(dev, t)
             if not is_down:
-                c.ei_device_stop_emulating(dev)
+                self._stop_emulating(dev)
 
     def type_char(self, char: str) -> bool:
         """Types a single character using evdev keycodes and shift modifier.
@@ -525,8 +587,15 @@ class EIClient:
         time.sleep(0.08)
         self.button_click(button_code)
 
+    @property
+    def is_connected(self) -> bool:
+        """Returns True if the libei session is active and connected."""
+        return self._connected
+
     def close(self) -> None:
         """Clean up libei context and close file descriptor."""
+        self._connected = False
+        self._emulating_devices.clear()
         if self.ctx and libei.available:
             libei._cdll.ei_unref(self.ctx)
             self.ctx = None

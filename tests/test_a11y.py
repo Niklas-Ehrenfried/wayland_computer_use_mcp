@@ -1,4 +1,4 @@
-"""Tests for AT-SPI2 accessibility tree inspection and pruning."""
+import pytest
 
 from wayland_computer_use_mcp.a11y import AtspiInspector, get_application_tree
 
@@ -61,3 +61,76 @@ def test_synthetic_tree_fallback():
     assert tree["role"] == "application"
     assert "PID 12345" in tree["name"] or "App-12345" in tree["name"]
     assert len(tree["children"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_perform_accessible_action_mocked():
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from wayland_computer_use_mcp.a11y.actions import (
+        do_accessible_action,
+        do_accessible_set_text,
+        perform_accessible_action,
+        perform_accessible_set_text,
+    )
+
+    mock_bus = AsyncMock()
+    mock_reply = MagicMock(body=[True])
+    mock_bus.call.return_value = mock_reply
+    mock_bus.disconnect = MagicMock()
+
+    with patch("wayland_computer_use_mcp.a11y.actions.AtspiInspector") as mock_insp_cls:
+        insp = mock_insp_cls.return_value
+        insp.connect = AsyncMock(return_value=True)
+        insp.close = AsyncMock()
+        insp.bus = mock_bus
+
+        # Test DoAction
+        assert await perform_accessible_action(":1.10", "/node/1", 0) is True
+        mock_bus.call.assert_called()
+
+        # Test SetTextContents
+        assert await perform_accessible_set_text(":1.10", "/node/1", "New Text") is True
+
+        # Test sync wrappers
+        assert do_accessible_action(":1.10", "/node/1", 0) is True
+        assert do_accessible_set_text(":1.10", "/node/1", "New Text") is True
+
+
+@pytest.mark.asyncio
+async def test_perform_accessible_text_actions():
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from wayland_computer_use_mcp.a11y.actions import (
+        do_accessible_text_action,
+        perform_accessible_text_action,
+    )
+
+    mock_bus = AsyncMock()
+    mock_reply = MagicMock(body=[True])
+    mock_bus.call.return_value = mock_reply
+    mock_bus.disconnect = MagicMock()
+
+    with patch("wayland_computer_use_mcp.a11y.actions.AtspiInspector") as mock_insp_cls:
+        insp = mock_insp_cls.return_value
+        insp.connect = AsyncMock(return_value=True)
+        insp.close = AsyncMock()
+        insp.bus = mock_bus
+
+        for act in ("copy", "cut", "paste", "select"):
+            assert await perform_accessible_text_action(":1.10", "/node/1", act, 0, 5) is True
+
+        assert do_accessible_text_action(":1.10", "/node/1", "copy") is True
+
+
+def test_accessible_action_failures():
+    from wayland_computer_use_mcp.a11y.actions import (
+        do_accessible_action,
+        do_accessible_set_text,
+        do_accessible_text_action,
+    )
+
+    # When bus is unavailable, sync methods cleanly return False
+    assert do_accessible_action("invalid.bus", "/invalid", 0) is False
+    assert do_accessible_set_text("invalid.bus", "/invalid", "test") is False
+    assert do_accessible_text_action("invalid.bus", "/invalid", "unknown") is False
