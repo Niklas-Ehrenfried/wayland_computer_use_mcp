@@ -110,10 +110,23 @@ class Config:
         - --display-mode=live|virtual, --virtual, --live
         - --access=window|fullscreen|both, --fullscreen, --window-only, --allow-all
         - --mock
+        - -h, --help, -v, --version
         """
         remaining = []
         for arg in args:
-            if arg.startswith("--display-mode="):
+            if arg in ("-h", "--help"):
+                print(get_help_text())
+                import sys
+
+                sys.exit(0)
+            elif arg in ("-v", "--version"):
+                import sys
+
+                from wayland_computer_use_mcp import __version__
+
+                print(f"wayland-computer-use-mcp {__version__}")
+                sys.exit(0)
+            elif arg.startswith("--display-mode="):
                 mode = arg.split("=", 1)[1].strip().lower()
                 if mode in ("live", "virtual"):
                     self.display_mode = mode  # type: ignore
@@ -148,6 +161,32 @@ class Config:
         data["token_cache_dir"] = str(self.token_cache_dir)
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+
+
+def get_help_text() -> str:
+    """Returns formatted CLI help text."""
+    return """wayland-computer-use-mcp: High-performance Wayland GUI automation MCP server.
+
+Usage:
+  wayland-computer-use-mcp [OPTIONS]
+
+Options:
+  --live                      Run in active Wayland user desktop session (default).
+  --virtual                   Run in an isolated virtual Wayland compositor session.
+  --display-mode=MODE         Set display mode ('live' or 'virtual').
+  --window-only               Clamp capture and input to active application window (default).
+  --fullscreen, --monitor     Allow full desktop/screen capture and interaction.
+  --allow-all                 Allow either window or display capture.
+  --access=ACCESS             Set access mode ('window', 'fullscreen', or 'both').
+  --mock                      Run in headless mock mode for testing/CI.
+  -h, --help                  Show this help message and exit.
+  -v, --version               Show version and exit.
+
+Environment Variables:
+  WAYLAND_MCP_DISPLAY_MODE    'live' or 'virtual'
+  WAYLAND_MCP_ACCESS_MODE     'window', 'fullscreen', or 'both'
+  WAYLAND_MCP_SAVE_FRAMES_DIR Directory to persist artifacts when save_artifact=True
+"""
 
 
 _active_config: Config | None = None

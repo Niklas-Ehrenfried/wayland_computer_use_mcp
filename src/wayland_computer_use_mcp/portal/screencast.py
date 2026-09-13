@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +24,7 @@ try:
 except Exception as exc:
     logger.warning("GStreamer PyGObject bindings unavailable: %s", exc)
 
-DEFAULT_SAVE_DIR = "/home/niklas/.gemini/antigravity/brain/539f5e12-8178-4a5e-b7b9-b96af1210fa6"
+DEFAULT_SAVE_DIR = Path.home() / ".cache" / "wayland-computer-use-mcp" / "screenshots"
 
 
 def crop_element(
@@ -122,13 +121,13 @@ class ScreenCastPipeline:
             logger.debug("Failed to pull GStreamer sample: %s", exc)
             return None
 
-    def save_frame(self, frame: Image.Image) -> str | None:
+    def save_frame(self, frame: Image.Image, filename: str = "latest_capture.png") -> str | None:
         """Persists captured frame to disk and updates last_saved_frame_path."""
-        save_dir_env = os.environ.get("WAYLAND_MCP_SAVE_FRAMES_DIR") or DEFAULT_SAVE_DIR
+        save_dir_env = os.environ.get("WAYLAND_MCP_SAVE_FRAMES_DIR")
+        save_dir = Path(save_dir_env) if save_dir_env else DEFAULT_SAVE_DIR
         try:
-            save_dir = Path(save_dir_env)
             save_dir.mkdir(parents=True, exist_ok=True)
-            frame_path = save_dir / f"frame_{int(time.time() * 1000)}.png"
+            frame_path = save_dir / filename
             frame.save(frame_path)
             self.last_saved_frame_path = str(frame_path)
             return self.last_saved_frame_path

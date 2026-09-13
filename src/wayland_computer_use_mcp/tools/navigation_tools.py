@@ -11,9 +11,15 @@ from fastmcp import FastMCP
 from wayland_computer_use_mcp.a11y import (
     get_application_tree,
     get_cached_node,
+    global_event_listener,
     invoke_node_action,
 )
-from wayland_computer_use_mcp.delta import wrap_with_delta
+from wayland_computer_use_mcp.delta import (
+    compute_ui_delta,
+    format_delta_markdown,
+    snapshot_interactive_state,
+    wrap_with_delta,
+)
 from wayland_computer_use_mcp.portal import global_portal_session
 from wayland_computer_use_mcp.process import (
     check_process_health_and_enrich,
@@ -100,6 +106,7 @@ def interact_with_node(
     pid: int | None = None,
     start_offset: int = 0,
     end_offset: int = -1,
+    settle_timeout_ms: int = 0,
 ) -> str:
     """Interacts with an interactive UI widget by 1D node ID (e.g. 'b1', 'e1') or label.
 
@@ -156,7 +163,8 @@ def interact_with_node(
         )
 
     if effective_pid > 0 and not global_portal_session.is_mock:
-        raw_res = wrap_with_delta(effective_pid, _execute, settle_ms=80)
+        settle_ms = max(80, settle_timeout_ms)
+        raw_res = wrap_with_delta(effective_pid, _execute, settle_ms=settle_ms)
         return check_process_health_and_enrich(effective_pid, raw_res)
     else:
         return _execute()
@@ -207,6 +215,10 @@ def batch_actions(
 
     for idx, step in enumerate(actions, start=1):
         action_type = step.get("action", "").lower()
+        before = None
+        if effective_pid > 0 and not global_portal_session.is_mock and action_type != "wait":
+            before = snapshot_interactive_state(effective_pid)
+
         try:
             if action_type in ("interact", "click"):
                 if "node_id" in step:
@@ -261,6 +273,12 @@ def batch_actions(
             else:
                 raise ValueError(f"Unknown action type '{action_type}' at step {idx}")
 
+            if before is not None:
+                time.sleep(0.04)
+                after = snapshot_interactive_state(effective_pid)
+                delta = compute_ui_delta(before, after)
+                step_res += format_delta_markdown(delta)
+
             enriched = check_process_health_and_enrich(effective_pid, step_res)
             executed_results.append(f"Step {idx}: {enriched}")
 
@@ -281,8 +299,25 @@ def batch_actions(
     }
 
 
+def watch_ui_events(
+    timeout_ms: int = 500,
+    pid: int | None = None,
+) -> dict[str, Any]:
+    """Awaits UI settlement by monitoring real-time AT-SPI2 D-Bus mutation events.
+
+    Returns captured mutations and whether the UI has settled, eliminating the need
+    to re-query the full accessibility tree after triggers.
+    """
+    effective_pid = pid or global_portal_session.target_pid
+    global_event_listener.start()
+    res = global_event_listener.wait_for_settled(timeout_ms=timeout_ms, pid=effective_pid)
+    res["pid"] = effective_pid
+    return res
+
+
 def register_navigation_tools(mcp: FastMCP) -> None:
     """Registers semantic tree inspection and interaction tools onto the FastMCP server."""
     mcp.tool()(inspect_ui_tree)
     mcp.tool()(interact_with_node)
     mcp.tool()(batch_actions)
+    mcp.tool()(watch_ui_events)

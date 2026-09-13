@@ -58,18 +58,17 @@ def test_compute_ui_delta_mutations():
     md = format_delta_markdown(delta)
     assert "• b1 [button]: text 'Click Me (0)' ➔ 'Click Me (1)'" in md
     assert "value 0 ➔ 1" in md
-    assert "+focused" in md
-    assert "• Appeared: new_node ('New')" in md
-    assert "• Hidden: old_node ('Old')" in md
+    assert "• Appeared: new_node [panel] ('New')" in md
+    assert "• Hidden: old_node [panel] ('Old')" in md
 
 
 def test_format_delta_markdown_overflow():
-    """Verifies truncation formatting when > 5 elements appear or disappear."""
+    """Verifies truncation formatting when elements exceed max_items."""
     appeared = [{"id": f"n{i}", "name": f"Node{i}"} for i in range(10)]
     hidden = [{"id": f"h{i}", "name": f"Hidden{i}"} for i in range(8)]
     delta = {"modified": [], "appeared": appeared, "hidden": hidden}
 
-    md = format_delta_markdown(delta)
+    md = format_delta_markdown(delta, max_items=5)
     assert "+5 more" in md
     assert "+3 more" in md
 

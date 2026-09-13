@@ -32,7 +32,7 @@ from wayland_computer_use_mcp.security import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SAVE_DIR = "/home/niklas/.gemini/antigravity/brain/539f5e12-8178-4a5e-b7b9-b96af1210fa6"
+DEFAULT_SAVE_DIR = Path.home() / ".cache" / "wayland-computer-use-mcp" / "screenshots"
 
 
 class PortalSession:
@@ -246,7 +246,12 @@ class PortalSession:
         except Exception:
             return None
 
-    def capture_frame(self, crop_box: list[int] | None = None) -> Image.Image:
+    def capture_frame(
+        self,
+        crop_box: list[int] | None = None,
+        save_to_disk: bool = False,
+        filename: str = "latest_capture.png",
+    ) -> Image.Image:
         """Retrieves the latest video frame as a PIL.Image, updating bounds and cropping."""
         self.check_active_app()
         if not self._initialized:
@@ -307,7 +312,8 @@ class PortalSession:
         else:
             result_frame = frame
 
-        self._screencast.save_frame(result_frame)
+        if save_to_disk:
+            self._screencast.save_frame(result_frame, filename=filename)
         return result_frame
 
     def crop_element(
@@ -398,7 +404,10 @@ class PortalSession:
         return self._input.dispatch_clipboard_write(text)
 
     def generate_labeled_screenshot(
-        self, pid: int | None = None
+        self,
+        pid: int | None = None,
+        save_to_disk: bool = False,
+        filename: str = "latest_labeled.png",
     ) -> tuple[Image.Image, list[dict[str, Any]]]:
         """Captures window frame and overlays numbered Set-of-Marks badges for widgets."""
         self.check_active_app(pid)
@@ -407,7 +416,7 @@ class PortalSession:
         if pid:
             self.target_pid = pid
 
-        frame = self.capture_frame()
+        frame = self.capture_frame(save_to_disk=False)
         tree = get_application_tree(pid or self.target_pid or 0)
 
         interactive_roles = {
@@ -454,15 +463,16 @@ class PortalSession:
         root_bounds = tree.get("bounds", [0, 0, 0, 0])
         final_img, legend = draw_labeled_overlay(frame, elements, root_bounds)
 
-        save_dir_env = os.environ.get("WAYLAND_MCP_SAVE_FRAMES_DIR") or DEFAULT_SAVE_DIR
-        try:
-            save_dir = Path(save_dir_env)
-            save_dir.mkdir(parents=True, exist_ok=True)
-            labeled_path = save_dir / f"labeled_{int(time.time() * 1000)}.png"
-            final_img.save(labeled_path)
-            self.last_saved_labeled_path = str(labeled_path)
-        except Exception as exc:
-            logger.debug("Failed to save labeled frame: %s", exc)
+        if save_to_disk:
+            save_dir_env = os.environ.get("WAYLAND_MCP_SAVE_FRAMES_DIR")
+            save_dir = Path(save_dir_env) if save_dir_env else DEFAULT_SAVE_DIR
+            try:
+                save_dir.mkdir(parents=True, exist_ok=True)
+                labeled_path = save_dir / filename
+                final_img.save(labeled_path)
+                self.last_saved_labeled_path = str(labeled_path)
+            except Exception as exc:
+                logger.debug("Failed to save labeled frame: %s", exc)
 
         return final_img, legend
 

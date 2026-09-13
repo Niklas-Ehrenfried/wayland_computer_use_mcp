@@ -172,21 +172,24 @@ def take_labeled_screenshot(
         except Exception:
             pass
 
-    pil_img, legend = global_portal_session.generate_labeled_screenshot(pid=effective_pid)
+    pil_img, legend = global_portal_session.generate_labeled_screenshot(
+        pid=effective_pid, save_to_disk=False
+    )
     buf = io.BytesIO()
     pil_img.save(buf, format="PNG")
     raw_bytes = buf.getvalue()
     b64_data = base64.b64encode(raw_bytes).decode("utf-8")
 
-    labeled_path_str = global_portal_session.last_saved_labeled_path or ""
+    embed_path = ""
+    embed_header = ""
     if save_artifact:
         try:
             artifact_dir = Path(".agents/artifacts/screenshots")
             artifact_dir.mkdir(parents=True, exist_ok=True)
             artifact_path = artifact_dir / "latest_labeled.png"
             artifact_path.write_bytes(raw_bytes)
-            if not labeled_path_str:
-                labeled_path_str = str(artifact_path.resolve())
+            embed_path = str(artifact_path.resolve())
+            embed_header = f"![Labeled Screenshot]({embed_path})\n\n"
         except Exception:
             pass
 
@@ -197,8 +200,6 @@ def take_labeled_screenshot(
         },
         indent=2,
     )
-    embed_path = labeled_path_str or "latest_labeled.png"
-    embed_header = f"![Labeled Screenshot]({embed_path})\n\n"
 
     items: list[Any] = [
         TextContent(type="text", text=f"{embed_header}{legend_text}"),
@@ -233,33 +234,36 @@ def capture_window_frame(
         except Exception:
             pass
 
-    pil_img = global_portal_session.capture_frame(crop_box)
+    pil_img = global_portal_session.capture_frame(crop_box=crop_box, save_to_disk=False)
     buf = io.BytesIO()
     pil_img.save(buf, format="PNG")
     raw_bytes = buf.getvalue()
     b64_data = base64.b64encode(raw_bytes).decode("utf-8")
 
-    saved_path_str = global_portal_session.last_saved_frame_path or ""
+    embed_path = ""
     if save_artifact:
         try:
             artifact_dir = Path(".agents/artifacts/screenshots")
             artifact_dir.mkdir(parents=True, exist_ok=True)
             artifact_path = artifact_dir / "latest_capture.png"
             artifact_path.write_bytes(raw_bytes)
-            if not saved_path_str:
-                saved_path_str = str(artifact_path.resolve())
+            embed_path = str(artifact_path.resolve())
         except Exception:
             pass
 
-    embed_path = saved_path_str or "latest_capture.png"
+    if embed_path:
+        text_desc = (
+            f"Frame captured ({pil_img.width}x{pil_img.height}) "
+            f"and saved to artifact: {embed_path}\n"
+            f"![Captured Frame]({embed_path})"
+        )
+    else:
+        text_desc = f"Frame captured ({pil_img.width}x{pil_img.height}) in-memory."
+
     contents: list[Any] = [
         TextContent(
             type="text",
-            text=(
-                f"Frame captured ({pil_img.width}x{pil_img.height}) "
-                f"and saved to artifact: {embed_path}\n"
-                f"![Captured Frame]({embed_path})"
-            ),
+            text=text_desc,
         ),
         ImageContent(
             type="image",

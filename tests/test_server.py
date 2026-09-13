@@ -35,6 +35,8 @@ async def test_registered_tools():
         "install_to_desktop",
         "uninstall_from_desktop",
         "window_control",
+        "list_managed_apps",
+        "watch_ui_events",
     ]
 
     tools = await mcp.list_tools()

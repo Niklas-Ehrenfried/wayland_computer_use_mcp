@@ -16,6 +16,8 @@ from wayland_computer_use_mcp.process import (
     get_logs,
     is_responsive,
     launch,
+    list_active_processes,
+    prune_dead_processes,
     terminate,
 )
 from wayland_computer_use_mcp.process import (
@@ -76,6 +78,15 @@ def launch_app(
     except Exception:
         pass
 
+    initial_elements: list[dict[str, Any]] = []
+    try:
+        from wayland_computer_use_mcp.a11y import get_application_tree
+
+        tree = get_application_tree(pid)
+        initial_elements = tree.get("interactive_elements", [])
+    except Exception:
+        pass
+
     return {
         "status": "launched",
         "pid": pid,
@@ -85,6 +96,7 @@ def launch_app(
         "session_handle": global_portal_session.session_handle,
         "restore_token": global_portal_session.restore_token,
         "eis_connected": global_portal_session.eis_fd is not None,
+        "interactive_elements": initial_elements,
     }
 
 
@@ -103,6 +115,15 @@ def restart_app(pid: int) -> dict[str, Any]:
     except Exception:
         pass
 
+    initial_elements: list[dict[str, Any]] = []
+    try:
+        from wayland_computer_use_mcp.a11y import get_application_tree
+
+        tree = get_application_tree(new_pid)
+        initial_elements = tree.get("interactive_elements", [])
+    except Exception:
+        pass
+
     return {
         "status": "restarted",
         "old_pid": pid,
@@ -110,6 +131,7 @@ def restart_app(pid: int) -> dict[str, Any]:
         "session_handle": global_portal_session.session_handle,
         "restore_token": global_portal_session.restore_token,
         "eis_connected": global_portal_session.eis_fd is not None,
+        "interactive_elements": initial_elements,
     }
 
 
@@ -129,13 +151,27 @@ def terminate_app(pid: int | None = None) -> dict[str, Any]:
     }
 
 
+def list_managed_apps() -> dict[str, Any]:
+    """Lists all active application processes managed by this MCP session."""
+    active = list_active_processes()
+    return {
+        "active_apps_count": len(active),
+        "target_pid": global_portal_session.target_pid,
+        "apps": active,
+    }
+
+
 def check_app_liveness(pid: int | None = None) -> dict[str, Any]:
     """Verifies if an application process is active, alive, and responsive."""
+    prune_dead_processes()
     effective_pid = pid or global_portal_session.target_pid
     if not effective_pid:
         return {"pid": 0, "alive": False, "responsive": False}
 
     responsive = is_responsive(effective_pid)
+    if not responsive and global_portal_session.target_pid == effective_pid:
+        global_portal_session.target_pid = None
+
     return {
         "pid": effective_pid,
         "alive": responsive,
@@ -156,3 +192,4 @@ def register_process_tools(mcp: FastMCP) -> None:
     mcp.tool()(launch_app)
     mcp.tool()(terminate_app)
     mcp.tool()(get_app_logs)
+    mcp.tool()(list_managed_apps)

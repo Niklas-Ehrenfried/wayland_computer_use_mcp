@@ -22,6 +22,10 @@ from wayland_computer_use_mcp.a11y.constants import (
     INTERACTIVE_ROLES,
     ROLE_PREFIX_MAP,
 )
+from wayland_computer_use_mcp.a11y.events import (
+    AtspiEventListener,
+    global_event_listener,
+)
 from wayland_computer_use_mcp.a11y.synthetic import build_synthetic_tree
 from wayland_computer_use_mcp.a11y.tree import (
     _node_cache,
@@ -32,6 +36,7 @@ from wayland_computer_use_mcp.a11y.tree import (
 )
 
 __all__ = [
+    "AtspiEventListener",
     "CONTAINER_ROLES",
     "IGNORED_ROLES",
     "INTERACTIVE_ROLES",
@@ -46,6 +51,7 @@ __all__ = [
     "flatten_tree",
     "get_application_tree",
     "get_cached_node",
+    "global_event_listener",
     "invoke_node_action",
     "perform_accessible_action",
     "perform_accessible_set_text",

@@ -13,6 +13,17 @@ authors = [
     { name = "DeepMind & Antigravity Community" }
 ]
 keywords = ["wayland", "mcp", "fastmcp", "pipewire", "libei", "at-spi", "desktop-use", "testing"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Desktop Environment :: Window Managers",
+    "Topic :: Software Development :: Testing",
+]
 dependencies = [
     "fastmcp>=2.0.0",
     "dbus-fast>=2.20.0",
@@ -20,6 +31,12 @@ dependencies = [
     "pycairo>=1.26.0",
     "PyGObject>=3.48.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Niklas-Ehrenfried/wayland_computer_use_mcp"
+Repository = "https://github.com/Niklas-Ehrenfried/wayland_computer_use_mcp"
+Issues = "https://github.com/Niklas-Ehrenfried/wayland_computer_use_mcp/issues"
+Changelog = "https://github.com/Niklas-Ehrenfried/wayland_computer_use_mcp/blob/master/TODO.md"
 
 [project.optional-dependencies]
 dev = [

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 # Global thread-safe state
-_lock = threading.Lock()
+_lock = threading.RLock()
 _processes: dict[int, subprocess.Popen[str]] = {}
 _logs: dict[int, collections.deque[str]] = {}
 _proc_metadata: dict[int, dict[str, Any]] = {}
@@ -292,3 +292,50 @@ def check_process_health_and_enrich(pid: int | None, result_text: str) -> str:
         )
 
     return result_text
+
+
+def prune_dead_processes() -> list[int]:
+    """Scans tracked processes, removes any that have exited, and returns pruned PIDs."""
+    pruned: list[int] = []
+    with _lock:
+        for pid, proc in list(_processes.items()):
+            if proc.poll() is not None or not is_responsive(pid):
+                _processes.pop(pid, None)
+                pruned.append(pid)
+    return pruned
+
+
+def list_active_processes() -> list[dict[str, Any]]:
+    """Returns metadata for all currently active managed application processes."""
+    prune_dead_processes()
+    results: list[dict[str, Any]] = []
+    with _lock:
+        for pid in list(_processes.keys()):
+            meta = _proc_metadata.get(pid, {})
+            results.append(
+                {
+                    "pid": pid,
+                    "target": meta.get("target_script", "unknown"),
+                    "args": meta.get("args", []),
+                    "responsive": is_responsive(pid),
+                }
+            )
+    return results
+
+
+def terminate_all_processes() -> list[int]:
+    """Terminates all currently managed child processes cleanly.
+
+    Invoked during server shutdown or cleanup.
+    """
+    with _lock:
+        pids = list(_processes.keys())
+
+    terminated: list[int] = []
+    for pid in pids:
+        try:
+            terminate(pid)
+            terminated.append(pid)
+        except Exception:
+            pass
+    return terminated

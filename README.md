@@ -90,11 +90,28 @@ To guarantee safe operation despite upstream protocol constraints, this server i
 uvx wayland-computer-use-mcp
 ```
 
+### Linux Distribution Prerequisites
+
+`wayland-computer-use-mcp` utilizes native Wayland portals, AT-SPI2 accessibility D-Bus, and PyGObject for GTK4/Adwaita automation:
+
+- **Debian / Ubuntu / Pop!_OS**:
+  ```bash
+  sudo apt install -y python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 at-spi2-core dbus-x11 wl-clipboard
+  ```
+- **Fedora / RHEL**:
+  ```bash
+  sudo dnf install -y python3-gobject gtk4 libadwaita at-spi2-core dbus-x11 wl-clipboard
+  ```
+- **Arch Linux / Manjaro**:
+  ```bash
+  sudo pacman -S --needed python-gobject gtk4 libadwaita at-spi2-core dbus wl-clipboard
+  ```
+
 ### Install in Virtual Environment
 
 ```bash
-git clone https://github.com/your-org/wayland-computer-use-mcp.git
-cd wayland-computer-use-mcp
+git clone https://github.com/Niklas-Ehrenfried/wayland_computer_use_mcp.git
+cd wayland_computer_use_mcp
 uv venv --python python3 --system-site-packages
 source .venv/bin/activate
 uv pip install -e .
@@ -170,15 +187,15 @@ uv pip install -e .
 
 ---
 
-## Exposed Tool Suite (21 Tools)
+## Exposed Tool Suite (23 Tools)
 
-### 1. Tree-First Semantic Navigation
+### 1. Tree-First Semantic Navigation (4 Tools)
 - **`inspect_ui_tree(pid, max_depth)`**: Returns the collapsed 1D interactive element list (`b1`, `e1`, `c1`) with widget names, roles, states, and coordinates.
-- **`interact_with_node(node_id, action, text, ...)`**: Dispatches semantic interactions. Visibly traces cursor, executes AT-SPI action, and falls back to physical input if required. Auto-scrolls viewport if target is off-screen.
-- **`click_element_by_label(label, role)`**: Resolves widgets by visible label or role and performs a targeted click.
-- **`batch_actions(actions, pid)`**: Executes a batch of sequential UI operations atomically without intermediate screenshot pauses.
+- **`interact_with_node(node_id, action, text, settle_timeout_ms, ...)`**: Dispatches semantic interactions. Visibly traces cursor, executes AT-SPI action, waits for D-Bus UI event settlement, and falls back to physical input if required. Returns actionable UI deltas.
+- **`batch_actions(actions, pid)`**: Executes a batch of sequential UI operations atomically with step-by-step delta tracking without intermediate screenshot pauses.
+- **`watch_ui_events(pid, timeout_seconds)`**: Streams AT-SPI2 D-Bus accessibility events (`Object:StateChanged`, `ChildrenChanged`, `TextChanged`, `Window:Activate`) directly to observe async UI changes.
 
-### 2. Clamped Physical Input
+### 2. Clamped Physical Input (8 Tools)
 - **`click(x, y, button)`**: Executes a mouse click clamped to window bounds.
 - **`double_click(x, y, button)`**: Dispatches a standard mouse double-click.
 - **`right_click(x, y)`**: Dispatches a right-click (context menu).
@@ -188,21 +205,29 @@ uv pip install -e .
 - **`type_text(text, x, y)`**: Types text using evdev keycodes with automated clipboard paste fallback for strings > 30 characters.
 - **`key_combination(keys)`**: Sends modifier hotkeys (e.g. `["ctrl", "s"]`, `["alt", "tab"]`).
 
-### 3. Visual Grounding & Inspection
-- **`capture_window_frame(crop_box)`**: Captures a high-resolution window frame. Yields Markdown image preview links and MCP standard `ImageContent` blocks.
-- **`take_labeled_screenshot()`**: Captures window frame annotated with numbered Set-of-Marks boundary badges.
+### 3. Visual Grounding & Inspection (2 Tools)
+- **`capture_window_frame(crop_box, save_artifact)`**: Captures a high-resolution window frame. In-memory MCP `ImageContent` by default; saves rolling disk cache when `save_artifact=True`.
+- **`take_labeled_screenshot(save_artifact)`**: Captures window frame annotated with numbered Set-of-Marks boundary badges and cyan bounding boxes for layout grounding.
 
-### 4. Process Lifecycle & Crash Interception
-- **`launch_app(script_path, args, cwd)`**: Spawns Python GUI scripts with automatic virtual environment discovery.
+### 4. Process Lifecycle & Crash Interception (4 Tools)
+- **`launch_app(script_path, args, cwd)`**: Spawns Python GUI scripts with automatic virtual environment discovery. **Immediately returns the initial interactive element tree** so agents can act without a separate `inspect_ui_tree` call.
 - **`terminate_app(pid)`**: Terminates application processes cleanly (`SIGTERM` escalated to `SIGKILL`).
-- **`get_app_logs(pid, lines)`**: Retrieves console output and crash tracebacks from a thread-safe 200-line circular buffer.
+- **`list_managed_apps()`**: Lists all active processes managed by the MCP server, pruning dead PIDs.
+- **`get_app_logs(pid, lines)`**: Retrieves console output and crash tracebacks from a thread-safe circular buffer.
 
-### 5. OS & Desktop Integration
+### 5. OS & Desktop Integration (5 Tools)
 - **`clipboard_read()`**: Reads text from the Wayland clipboard (`wl-paste`).
 - **`clipboard_write(text)`**: Writes text to the Wayland clipboard (`wl-copy`).
 - **`window_control(action, pid)`**: Controls window state (`minimize`, `maximize`, `restore`, `close`).
 - **`install_to_desktop(app_id, name, ...)`**: Generates a valid Linux `.desktop` launcher with worktree detection and version badging.
 - **`uninstall_from_desktop(app_id)`**: Removes desktop launchers and associated icons.
+
+---
+
+## MCP Prompts & Resources
+
+- **Prompt: `wayland_automation_guide`**: Best-practice agent instructions for tree-first navigation, delta-to-delta flow, and fallback rules.
+- **Resource: `wayland://system_prompt`**: Dynamic guidelines for LLM agent integration into client system prompts.
 
 ---
 
@@ -224,3 +249,4 @@ uv run pytest tests/test_live_example_app.py -v
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
+

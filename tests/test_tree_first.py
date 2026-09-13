@@ -319,7 +319,7 @@ def test_compute_ui_delta_and_format():
     assert "b1 [button]: text 'Click Me! (0 clicks)' ➔ 'Clicked! (1 clicks)'" in md
     assert "e1 [entry]: value '' ➔ 'New text'" in md
     assert "-checked" in md
-    assert "b2 ('Submit')" in md
+    assert "b2 [button] ('Submit')" in md
 
 
 def test_all_9_actionable_widgets_offline_suite():

@@ -111,7 +111,10 @@ def compute_ui_delta(
     }
 
 
-def format_delta_markdown(delta: dict[str, list[dict[str, Any]]]) -> str:
+def format_delta_markdown(
+    delta: dict[str, list[dict[str, Any]]],
+    max_items: int = 20,
+) -> str:
     """Formats categorized UI mutations into a compact, agent-friendly Markdown block."""
     modified = delta.get("modified", [])
     appeared = delta.get("appeared", [])
@@ -129,15 +132,32 @@ def format_delta_markdown(delta: dict[str, list[dict[str, Any]]]) -> str:
         lines.append(f"• {node_id} [{role}]: {desc}")
 
     if appeared:
-        app_strs = [f"{item['id']} ('{item.get('name', '')}')" for item in appeared[:5]]
-        if len(appeared) > 5:
-            app_strs.append(f"+{len(appeared) - 5} more")
+        app_strs = []
+        for item in appeared[:max_items]:
+            nid = item.get("id", "")
+            name = item.get("name", "")
+            role = item.get("role")
+            role_part = f" [{role}]" if role else ""
+            name_part = f" ('{name}')" if name else ""
+            states = item.get("states", set())
+            state_flags = [s for s in ("focused", "checked", "selected") if s in states]
+            state_part = f" ({', '.join(state_flags)})" if state_flags else ""
+            app_strs.append(f"{nid}{role_part}{name_part}{state_part}")
+        if len(appeared) > max_items:
+            app_strs.append(f"+{len(appeared) - max_items} more")
         lines.append(f"• Appeared: {', '.join(app_strs)}")
 
     if hidden:
-        hid_strs = [f"{item['id']} ('{item.get('name', '')}')" for item in hidden[:5]]
-        if len(hidden) > 5:
-            hid_strs.append(f"+{len(hidden) - 5} more")
+        hid_strs = []
+        for item in hidden[:max_items]:
+            nid = item.get("id", "")
+            name = item.get("name", "")
+            role = item.get("role")
+            role_part = f" [{role}]" if role else ""
+            name_part = f" ('{name}')" if name else ""
+            hid_strs.append(f"{nid}{role_part}{name_part}")
+        if len(hidden) > max_items:
+            hid_strs.append(f"+{len(hidden) - max_items} more")
         lines.append(f"• Hidden: {', '.join(hid_strs)}")
 
     return "\n".join(lines)
@@ -147,6 +167,7 @@ def wrap_with_delta(
     pid: int,
     action_fn: Callable[[], str],
     settle_ms: int = 80,
+    max_delta_items: int = 20,
 ) -> str:
     """Executes action_fn while tracking pre- and post-action UI deltas."""
     if pid <= 0:
@@ -159,5 +180,5 @@ def wrap_with_delta(
     after = snapshot_interactive_state(pid)
 
     delta = compute_ui_delta(before, after)
-    delta_str = format_delta_markdown(delta)
+    delta_str = format_delta_markdown(delta, max_items=max_delta_items)
     return f"{result}{delta_str}"

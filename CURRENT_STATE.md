@@ -39,30 +39,34 @@ This document provides a technical component-by-component breakdown of `wayland-
 ## 2. Component Packages Breakdown
 
 ### A. FastMCP Server Entrypoint ([`server.py`](file:///home/niklas/Documents/Coding/Hobby/wayland_computer_use_mcp/src/wayland_computer_use_mcp/server.py))
-- **Role**: Exposes 21 tools over the MCP JSON-RPC protocol via `mcp.server.fastmcp.FastMCP`.
+- **Role**: Exposes 23 tools, 1 prompt (`wayland_automation_guide`), and 1 resource (`wayland://system_prompt`) over the MCP JSON-RPC protocol via `mcp.server.fastmcp.FastMCP`.
 - **Modularity**: Imports and re-exports tool suites from `wayland_computer_use_mcp.tools.*`, preserving backwards compatibility with older single-module imports while maintaining a cleanly sorted `__all__`.
-- **CLI Configuration**: Evaluates arguments (`--live`, `--virtual`, `--window-only`, `--fullscreen`) to initialize configuration before launching the FastMCP transport loop.
+- **CLI Configuration**: Evaluates arguments (`--live`, `--virtual`, `--window-only`, `--fullscreen`, `-h`/`--help`, `-v`/`--version`) before launching the FastMCP transport loop.
+- **Graceful Lifecycle Cleanup**: Intercepts `SIGINT`, `SIGTERM`, and `atexit` to terminate spawned processes and safely release XDG portal sessions and PipeWire streams.
 
 ---
 
 ### B. Modular Tools Package ([`tools/`](file:///home/niklas/Documents/Coding/Hobby/wayland_computer_use_mcp/src/wayland_computer_use_mcp/tools/))
-Partitioned into 5 focused domain sub-modules:
-1. **`input_tools.py`**:
+Partitioned into 5 focused domain sub-modules (23 tools total):
+1. **`input_tools.py`** (8 tools):
    - `click`, `double_click`, `right_click`, `hover`, `drag`, `scroll`, `type_text`, `key_combination`.
    - All input actions wrap execution in `wrap_with_delta(pid)` to return real-time reactive UI feedback.
-2. **`navigation_tools.py`**:
+2. **`navigation_tools.py`** (4 tools):
    - `inspect_ui_tree(pid, max_depth)`: Returns the collapsed 1D interactive widget list with compact IDs (`b1`, `e1`, `c1`).
-   - `interact_with_node(node_id, action, text, ...)`: Core semantic-first dispatcher implementing the hybrid execution model.
-   - `click_element_by_label(label, role)`: Resolves widgets by human-readable label or role and dispatches click.
-   - `batch_actions(actions, pid)`: Executes consecutive interactions atomically without intermediate screenshot latency.
-3. **`visual_tools.py`**:
-   - `capture_window_frame(crop_box)`: Dual-return format with Markdown embedded image link + base64 PNG block.
-   - `take_labeled_screenshot()`: Visual grounding overlay with numbered Set-of-Marks badges.
-   - `focus_window(pid)`, `get_window_geometry(pid)`.
-4. **`process_tools.py`**:
-   - `launch_app`, `restart_app`, `terminate_app`, `check_app_liveness`, `get_app_logs`.
-   - Integrates Crash-to-Context error binding: automatically intercepts stderr tracebacks and enriches responses.
-5. **`system_tools.py`**:
+   - `interact_with_node(node_id, action, text, settle_timeout_ms, ...)`: Core semantic-first dispatcher implementing the hybrid execution model with event settlement.
+   - `batch_actions(actions, pid)`: Executes consecutive interactions atomically with step-by-step delta tracking without intermediate screenshot latency.
+   - `watch_ui_events(pid, timeout_seconds)`: Streams accessibility events directly from AT-SPI2 D-Bus to track asynchronous UI changes.
+3. **`visual_tools.py`** (2 tools):
+   - `capture_window_frame(crop_box, save_artifact)`: Returns MCP in-memory `ImageContent` by default to prevent storage leaks, saving to managed rolling cache only when requested.
+   - `take_labeled_screenshot(save_artifact)`: Visual grounding overlay with numbered Set-of-Marks badges and cyan bounding boxes.
+   - Internal helpers: `focus_window(pid)`, `get_window_geometry(pid)`.
+4. **`process_tools.py`** (4 tools):
+   - `launch_app(script_path, args, cwd)`: Spawns Python GUI scripts with automatic venv discovery, returning the **initial interactive UI tree immediately** to eliminate an extra tool call.
+   - `list_managed_apps()`: Lists all active sessions and prunes dead/externally-closed PIDs.
+   - `terminate_app(pid)`: Clean termination (`SIGTERM` escalated to `SIGKILL`).
+   - `get_app_logs(pid, lines)`: Retrieves console output and crash tracebacks from circular buffer.
+   - Internal helper: `check_app_liveness(pid)` with auto-pruning.
+5. **`system_tools.py`** (5 tools):
    - `clipboard_read`, `clipboard_write`: Native Wayland clipboard interaction via `wl-paste` / `wl-copy` with QDBus fallback.
    - `window_control(action, pid)`: State control (`minimize`, `maximize`, `restore`, `close`).
    - `install_to_desktop`, `uninstall_from_desktop`: Linux desktop launcher registration with git worktree detection.
@@ -73,8 +77,11 @@ Partitioned into 5 focused domain sub-modules:
 - **`client.py`**:
   - Resolves AT-SPI bus address via D-Bus session or unix domain socket (`/run/user/{uid}/at-spi/bus_0`).
   - Automatically sets `org.a11y.Status.ScreenReaderEnabled = True` and `IsEnabled = True` on D-Bus upon connection, enabling accessibility trees in Chromium and Electron apps without requiring special CLI flags.
+- **`events.py`**:
+  - Real-time AT-SPI2 D-Bus signal monitoring (`Object:StateChanged`, `ChildrenChanged`, `TextChanged`, `Window:Activate`).
+  - Implements `wait_for_settled(timeout_ms, pid)` to guarantee UI event settlement before returning deltas.
 - **`tree.py`**:
-  - Deep traversal (depth up to 24) across complex modern widget trees (Libadwaita `ToolbarView -> Overlay -> ScrolledWindow -> Viewport -> Box`).
+  - Deep traversal across complex modern widget trees (Libadwaita `ToolbarView -> Overlay -> ScrolledWindow -> Viewport -> Box`).
   - Prunes non-interactive layout containers into a compact 1D element list (`flatten_tree`).
   - Maintains `_node_cache` mapping compact IDs (`b1`, `e1`, `c1`) to D-Bus object paths and geometry.
 - **`actions.py`**:
@@ -107,7 +114,7 @@ Modular abstraction layer supporting heterogeneous Wayland compositors:
 - **`screencast.py`**:
   - Manages `org.freedesktop.portal.ScreenCast` session and PipeWire stream.
   - GStreamer pipeline dynamically decodes `RGBA`, `BGRA`, `BGRx`, `RGBx`, `RGB` buffers to PIL images without scanline corruption.
-  - Includes `stop()` cleanup method for releasing GStreamer pipelines.
+  - Pure in-memory streaming by default with rolling cache cleanup.
 - **`input.py`**:
   - `InputDispatcher`: Dispatches clicks, drags, hovers, and keyboard text typing.
   - Automatic clipboard fallback: For text longer than 30 characters or containing complex unicode, pastes directly via `Ctrl+V`.
@@ -126,7 +133,7 @@ Modular abstraction layer supporting heterogeneous Wayland compositors:
 ---
 
 ### G. Reactive Delta & Visual Overlay ([`delta.py`](file:///home/niklas/Documents/Coding/Hobby/wayland_computer_use_mcp/src/wayland_computer_use_mcp/delta.py) & [`overlay.py`](file:///home/niklas/Documents/Coding/Hobby/wayland_computer_use_mcp/src/wayland_computer_use_mcp/overlay.py))
-- **`delta.py`**: Computes state differences between pre- and post-action snapshots (`modified`, `appeared`, `hidden`), returning formatted markdown summaries directly to the LLM agent.
+- **`delta.py`**: Computes state differences between pre- and post-action snapshots (`modified`, `appeared`, `hidden`). Fully self-contained delta formatting exposes Node ID, Role, Label, and States without premature truncation, enabling continuous delta-to-delta navigation.
 - **`overlay.py`**: Renders Set-of-Marks visual markers: color-coded bounding boxes and badge pills `[1]`, `[2]` with system font fallbacks.
 
 ---
@@ -137,15 +144,17 @@ The server enforces a **Hybrid Semantic-First Execution Model**:
 1. **Observable Cursor Tracking**: Every interaction visibly hovers the pointer over the target widget `(cx, cy)` prior to actuation, giving human operators visual feedback in live mode and validating spatial coordinates.
 2. **Programmatic AT-SPI Execution**: Clicks, text entries, and selections execute atomically via AT-SPI D-Bus interfaces (`DoAction`, `EditableText`, `Text`) whenever supported.
 3. **Physical Fallback for Complex Surfaces**: Popover menus (`GtkDropDown`), list item selections, and custom canvas widgets fall back smoothly to physical coordinate clicks and keypresses.
-4. **Zero Phantom Bypasses**: Bypasses like `Selection.SelectChild` are strictly avoided; scrolling and navigation rely on real physical wheel events and in-built viewport auto-scrolling.
+4. **Continuous Delta-to-Delta Flow**: Actions return actionable UI deltas with full widget descriptors, eliminating redundant full-tree re-queries.
 
 ---
 
 ## 4. Test Suite & Validation Status
 
-| Test Suite | File | Tests | Pass Rate | Execution Time |
-| :--- | :--- | :--- | :--- | :--- |
-| **Live GUI E2E Suite** | [`tests/test_live_example_app.py`](file:///home/niklas/Documents/Coding/Hobby/wayland_computer_use_mcp/tests/test_live_example_app.py) | 14 | **100%** (14/14) | 58.83s |
-| **Non-Live Unit Tests** | `tests/test_*.py` | 105 | **100%** (105/105) | 55.21s |
-| **Ruff Code Style** | `src/`, `tests/` | 58 files | **100%** Clean | 0 errors |
+| Test Suite | File | Tests | Pass Rate |
+| :--- | :--- | :--- | :--- |
+| **Live GUI E2E Suite** | [`tests/test_live_example_app.py`](file:///home/niklas/Documents/Coding/Hobby/wayland_computer_use_mcp/tests/test_live_example_app.py) | 14 | **100%** (14/14) |
+| **Unit & Non-Live Tests** | `tests/test_*.py` | 114+ | **100%** |
+| **Ruff Code Style** | `src/`, `tests/` | 61 files | **100%** Clean (0 errors) |
+| **Packaging (PEP 561 / Twine)**| `pyproject.toml`, `py.typed` | Validated | **100%** PASSED |
+
 | **Vulture Dead Code** | `src/` | 58 files | **0 Dead Code** | Code 0 |
