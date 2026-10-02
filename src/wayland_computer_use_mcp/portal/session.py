@@ -7,11 +7,11 @@ import os
 import subprocess
 import threading
 import time
-from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageDraw
 
+from wayland_computer_use_mcp.artifacts import get_artifacts_dir
 from wayland_computer_use_mcp.config import get_config
 from wayland_computer_use_mcp.libei import EIClient
 from wayland_computer_use_mcp.overlay import draw_labeled_overlay
@@ -31,8 +31,6 @@ from wayland_computer_use_mcp.security import (
 )
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_SAVE_DIR = Path.home() / ".cache" / "wayland-computer-use-mcp" / "screenshots"
 
 
 class PortalSession:
@@ -416,58 +414,26 @@ class PortalSession:
         if pid:
             self.target_pid = pid
 
+        effective_pid = pid or self.target_pid or 0
         frame = self.capture_frame(save_to_disk=False)
-        tree = get_application_tree(pid or self.target_pid or 0)
+        tree = get_application_tree(effective_pid)
 
-        interactive_roles = {
-            "push button",
-            "button",
-            "entry",
-            "text",
-            "scale",
-            "slider",
-            "check box",
-            "radio button",
-            "menu item",
-            "link",
-            "page tab",
-            "combo box",
-        }
-        elements: list[dict[str, Any]] = []
-
-        def walk(node: dict[str, Any]) -> None:
-            role = node.get("role", "").lower()
-            bounds = node.get("bounds", [0, 0, 0, 0])
-            name = node.get("name", "").strip()
-            states = node.get("states", [])
-
-            if states and "visible" not in states and "showing" not in states:
-                return
-
-            if role in interactive_roles and len(bounds) == 4 and bounds[2] > 0 and bounds[3] > 0:
-                cx = bounds[0] + bounds[2] // 2
-                cy = bounds[1] + bounds[3] // 2
-                elements.append(
-                    {
-                        "role": role,
-                        "name": name,
-                        "bounds": bounds,
-                        "center": [cx, cy],
-                    }
-                )
-            for ch in node.get("children", []):
-                walk(ch)
-
-        walk(tree)
+        # Use comprehensive interactive_elements parsed and cached by flatten_tree
+        elements = [
+            el
+            for el in tree.get("interactive_elements", [])
+            if el.get("bounds")
+            and len(el["bounds"]) == 4
+            and el["bounds"][2] > 0
+            and el["bounds"][3] > 0
+        ]
 
         root_bounds = tree.get("bounds", [0, 0, 0, 0])
         final_img, legend = draw_labeled_overlay(frame, elements, root_bounds)
 
         if save_to_disk:
-            save_dir_env = os.environ.get("WAYLAND_MCP_SAVE_FRAMES_DIR")
-            save_dir = Path(save_dir_env) if save_dir_env else DEFAULT_SAVE_DIR
+            save_dir = get_artifacts_dir("screenshots")
             try:
-                save_dir.mkdir(parents=True, exist_ok=True)
                 labeled_path = save_dir / filename
                 final_img.save(labeled_path)
                 self.last_saved_labeled_path = str(labeled_path)

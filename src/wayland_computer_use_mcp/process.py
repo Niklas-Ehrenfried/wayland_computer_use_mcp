@@ -251,11 +251,11 @@ def get_recent_traceback(pid: int) -> str | None:
     return None
 
 
-def check_process_health_and_enrich(pid: int | None, result_text: str) -> str:
+def check_process_health_and_enrich(pid: int | None, result_text: Any) -> Any:
     """Checks process health after an action and attaches traceback if detected.
 
     - If the process terminated/crashed, raises RuntimeError with the formatted traceback.
-    - If the process is alive but emitted a traceback to stderr, appends an alert block.
+    - If the process is alive but emitted a traceback to stderr, appends an alert or warning field.
     """
     if not pid:
         return result_text
@@ -282,14 +282,17 @@ def check_process_health_and_enrich(pid: int | None, result_text: str) -> str:
         raise RuntimeError(f"Application process (PID {pid}) unexpectedly terminated or exited.")
 
     if tb:
-        return (
-            f"{result_text}\n\n"
-            f"> [!WARNING]\n"
-            f"> Application emitted a Python exception to stderr:\n"
-            f"> ```python\n"
-            f"> {tb}\n"
-            f"> ```"
+        warning_msg = (
+            "> [!WARNING]\n"
+            "> Application emitted a Python exception to stderr:\n"
+            "```python\n"
+            f"{tb}\n"
+            "```"
         )
+        if isinstance(result_text, dict):
+            result_text["warning"] = warning_msg
+            return result_text
+        return f"{result_text}\n\n{warning_msg}"
 
     return result_text
 

@@ -187,30 +187,32 @@ uv pip install -e .
 
 ---
 
-## Exposed Tool Suite (23 Tools)
+## Exposed Tool Suite (25 Tools)
 
-### 1. Tree-First Semantic Navigation (4 Tools)
-- **`inspect_ui_tree(pid, max_depth)`**: Returns the collapsed 1D interactive element list (`b1`, `e1`, `c1`) with widget names, roles, states, and coordinates.
-- **`interact_with_node(node_id, action, text, settle_timeout_ms, ...)`**: Dispatches semantic interactions. Visibly traces cursor, executes AT-SPI action, waits for D-Bus UI event settlement, and falls back to physical input if required. Returns actionable UI deltas.
+### 1. Tree-First Semantic Navigation & Macro Presets (5 Tools)
+- **`inspect_ui_tree(pid, max_depth)`**: Returns the collapsed 1D interactive element list (`b1`, `e1`, `c1`, `sw1`, `li1`) with widget names, roles, states, and coordinates.
+- **`interact_with_node(node_id, action, text, settle_timeout_ms, ...)`**: Dispatches semantic interactions. Visibly traces cursor, executes AT-SPI action, waits for D-Bus UI event settlement, and falls back to physical input if required. Returns structured JSON UI deltas.
 - **`batch_actions(actions, pid)`**: Executes a batch of sequential UI operations atomically with step-by-step delta tracking without intermediate screenshot pauses.
+- **`preset_workflow(action, name, description, steps, pid)`**: Manages and executes reusable multi-step interaction presets (`list`, `run`, `view`, `save`, `delete`) stored as persistent JSON artifacts under `.agents/artifacts/presets/`.
 - **`watch_ui_events(pid, timeout_seconds)`**: Streams AT-SPI2 D-Bus accessibility events (`Object:StateChanged`, `ChildrenChanged`, `TextChanged`, `Window:Activate`) directly to observe async UI changes.
 
 ### 2. Clamped Physical Input (8 Tools)
-- **`click(x, y, button)`**: Executes a mouse click clamped to window bounds.
-- **`double_click(x, y, button)`**: Dispatches a standard mouse double-click.
-- **`right_click(x, y)`**: Dispatches a right-click (context menu).
-- **`hover(x, y, duration_ms)`**: Moves pointer without clicking, activating Wayland tooltips or hover highlights.
-- **`drag(start_x, start_y, end_x, end_y)`**: Performs a clamped mouse drag gesture.
-- **`scroll(dx, dy)`**: Dispatches pointer wheel ticks via `NotifyPointerAxisDiscrete` and continuous deltas.
-- **`type_text(text, x, y)`**: Types text using evdev keycodes with automated clipboard paste fallback for strings > 30 characters.
-- **`key_combination(keys)`**: Sends modifier hotkeys (e.g. `["ctrl", "s"]`, `["alt", "tab"]`).
+- **`click(x, y, button, pid)`**: Executes a mouse click clamped to window bounds.
+- **`double_click(x, y, button, pid)`**: Dispatches a standard mouse double-click.
+- **`right_click(x, y, pid)`**: Dispatches a right-click (context menu).
+- **`hover(x, y, duration_ms, pid)`**: Moves pointer without clicking, activating Wayland tooltips or hover highlights.
+- **`drag(start_x, start_y, end_x, end_y, pid)`**: Performs a clamped mouse drag gesture.
+- **`scroll(dx, dy, pid)`**: Dispatches pointer wheel ticks via `NotifyPointerAxisDiscrete` and continuous deltas.
+- **`type_text(text, x, y, pid)`**: Types text using evdev keycodes with automated clipboard paste fallback for strings > 30 characters.
+- **`key_combination(keys, pid)`**: Sends modifier hotkeys (e.g. `["ctrl", "s"]`, `["alt", "tab"]`). All 8 input tools accept an optional `pid` to explicitly target a specific application window.
 
 ### 3. Visual Grounding & Inspection (2 Tools)
 - **`capture_window_frame(crop_box, save_artifact)`**: Captures a high-resolution window frame. In-memory MCP `ImageContent` by default; saves rolling disk cache when `save_artifact=True`.
-- **`take_labeled_screenshot(save_artifact)`**: Captures window frame annotated with numbered Set-of-Marks boundary badges and cyan bounding boxes for layout grounding.
+- **`take_labeled_screenshot(save_artifact)`**: Captures window frame annotated with Set-of-Marks boundary badges rendering compact semantic IDs (`[b1]`, `[e1]`, `[sw1]`) for zero-friction mental mapping to `interact_with_node`, covering all interactive widgets (including switches, list items, tree items, and table cells).
 
-### 4. Process Lifecycle & Crash Interception (4 Tools)
-- **`launch_app(script_path, args, cwd)`**: Spawns Python GUI scripts with automatic virtual environment discovery. **Immediately returns the initial interactive element tree** so agents can act without a separate `inspect_ui_tree` call.
+### 4. Process Lifecycle & Crash Interception (5 Tools)
+- **`launch_app(target, args, restart, cwd)`**: Spawns Python GUI scripts or system apps with automatic virtual environment discovery. **Immediately returns the initial interactive element tree** so agents can act without a separate `inspect_ui_tree` call.
+- **`restart_app(pid)`**: Gracefully terminates and re-launches an active process, preserving original launch arguments and working directory. Strictly validates process ownership: unmanaged or user-opened applications raise `PermissionError` to preserve desktop consistency.
 - **`terminate_app(pid)`**: Terminates application processes cleanly (`SIGTERM` escalated to `SIGKILL`).
 - **`list_managed_apps()`**: Lists all active processes managed by the MCP server, pruning dead PIDs.
 - **`get_app_logs(pid, lines)`**: Retrieves console output and crash tracebacks from a thread-safe circular buffer.

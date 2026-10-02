@@ -165,7 +165,13 @@ def test_process_tools_launch_app_with_restart():
 
 
 def test_process_tools_restart_app_direct():
+    # 1. Unmanaged / user PID must raise PermissionError
+    with pytest.raises(PermissionError, match="Only MCP-launched applications can be restarted"):
+        restart_app(1234)
+
+    # 2. Managed / MCP-launched PID succeeds
     with (
+        patch("wayland_computer_use_mcp.process._processes", {1234: None}),
         patch("wayland_computer_use_mcp.tools.process_tools.minimize_window"),
         patch("wayland_computer_use_mcp.tools.process_tools.restart_process", return_value=3333),
         patch("wayland_computer_use_mcp.tools.process_tools.ensure_portal_dialogs_above"),

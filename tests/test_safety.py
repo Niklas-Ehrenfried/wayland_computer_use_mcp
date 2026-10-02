@@ -8,17 +8,16 @@ from wayland_computer_use_mcp.security import (
     UserPreemptionManager,
 )
 from wayland_computer_use_mcp.server import (
-    click_element_by_label,
     clipboard_read,
     clipboard_write,
     double_click,
-    focus_window,
-    get_window_geometry,
     hover,
     key_combination,
     right_click,
     take_labeled_screenshot,
 )
+from wayland_computer_use_mcp.tools.navigation_tools import click_element_by_label
+from wayland_computer_use_mcp.tools.visual_tools import focus_window, get_window_geometry
 
 
 def test_system_shortcuts_strictly_blocked():
@@ -68,14 +67,18 @@ def test_allowed_application_shortcuts():
 
 def test_geometry_divergence_fail_safe():
     detector = GeometryDivergenceDetector()
-    detector.record_capture(1920, 1080)
+    detector.record_capture(1920, 1080, x=100, y=100)
 
     # Same geometry passes
-    detector.validate_stability(1920, 1080)
+    detector.validate_stability(1920, 1080, current_x=100, current_y=100)
 
-    # Geometry changed by user raises RuntimeError
+    # Window moved without resizing: passes cleanly and updates position baseline
+    detector.validate_stability(1920, 1080, current_x=250, current_y=350)
+    assert detector.last_position == (250, 350)
+
+    # Window resized by user raises RuntimeError (dimensions changed)
     with pytest.raises(RuntimeError, match="Window geometry changed"):
-        detector.validate_stability(1280, 720)
+        detector.validate_stability(1280, 720, current_x=250, current_y=350)
 
 
 def test_user_physical_input_preemption(monkeypatch):

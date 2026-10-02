@@ -35,13 +35,12 @@ from wayland_computer_use_mcp.tools.input_tools import (
 )
 from wayland_computer_use_mcp.tools.navigation_tools import (
     batch_actions,
-    click_element_by_label,
     inspect_ui_tree,
     interact_with_node,
     watch_ui_events,
 )
+from wayland_computer_use_mcp.tools.preset_tools import preset_workflow
 from wayland_computer_use_mcp.tools.process_tools import (
-    check_app_liveness,
     get_app_logs,
     launch_app,
     list_managed_apps,
@@ -57,8 +56,6 @@ from wayland_computer_use_mcp.tools.system_tools import (
 )
 from wayland_computer_use_mcp.tools.visual_tools import (
     capture_window_frame,
-    focus_window,
-    get_window_geometry,
     take_labeled_screenshot,
 )
 
@@ -70,7 +67,8 @@ mcp = FastMCP(
     instructions=(
         "Interactive Wayland window/desktop streaming, "
         "AT-SPI UI inspection, tree-first semantic navigation, "
-        "and clamped input suite with reactive UI delta feedback."
+        "reusable preset workflows, crash interception, "
+        "and clamped input suite with reactive JSON UI delta feedback."
     ),
 )
 
@@ -145,16 +143,12 @@ if __name__ == "__main__":
 __all__ = [
     "batch_actions",
     "capture_window_frame",
-    "check_app_liveness",
     "click",
-    "click_element_by_label",
     "clipboard_read",
     "clipboard_write",
     "double_click",
     "drag",
-    "focus_window",
     "get_app_logs",
-    "get_window_geometry",
     "hover",
     "inspect_ui_tree",
     "install_to_desktop",
@@ -164,6 +158,7 @@ __all__ = [
     "list_managed_apps",
     "main",
     "mcp",
+    "preset_workflow",
     "restart_app",
     "right_click",
     "scroll",

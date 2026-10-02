@@ -29,47 +29,53 @@ from wayland_computer_use_mcp.process import (
 logger = logging.getLogger("wayland_computer_use_mcp.tools.navigation")
 
 
-def _resolve_target_node_id(pid: int, target: str, role: str | None = None) -> str | None:
-    """Resolves a target that might be either a compact node ID or a widget label
-    with optional role filtering.
-    """
-    cached = get_cached_node(pid, target)
-    if cached:
-        return target
-
-    from wayland_computer_use_mcp.a11y import _node_cache
-
-    target_lower = target.strip().lower()
-    role_lower = role.strip().lower() if role else None
-
-    cached_for_pid = _node_cache.get(pid, {})
-    for nid, node in cached_for_pid.items():
+def _match_element(
+    candidates: list[tuple[str, dict[str, Any]]],
+    target_lower: str,
+    role_lower: str | None,
+) -> str | None:
+    # First pass: exact match
+    for nid, node in candidates:
         if role_lower and role_lower not in node.get("role", "").strip().lower():
             continue
         if node.get("name", "").strip().lower() == target_lower:
             return nid
-    for nid, node in cached_for_pid.items():
+    # Second pass: substring match
+    for nid, node in candidates:
         if role_lower and role_lower not in node.get("role", "").strip().lower():
             continue
         if target_lower in node.get("name", "").strip().lower():
             return nid
-
-    tree = get_application_tree(pid)
-    elements = tree.get("interactive_elements", [])
-
-    for el in elements:
-        if role_lower and role_lower not in el.get("role", "").strip().lower():
-            continue
-        if el.get("name", "").strip().lower() == target_lower:
-            return el.get("id")
-
-    for el in elements:
-        if role_lower and role_lower not in el.get("role", "").strip().lower():
-            continue
-        if target_lower in el.get("name", "").strip().lower():
-            return el.get("id")
-
     return None
+
+
+def _resolve_target_node_id(pid: int, target: str, role: str | None = None) -> str | None:
+    """Resolves a target that might be either a compact node ID or a widget label
+    with optional role filtering.
+    """
+    from wayland_computer_use_mcp.a11y import _node_cache
+
+    pid_cache = _node_cache.get(pid, {})
+    if target in pid_cache:
+        return target
+
+    cached = get_cached_node(pid, target)
+    if cached and "id" in cached:
+        return cached["id"]
+
+    target_lower = target.strip().lower()
+    role_lower = role.strip().lower() if role else None
+
+    # Check cached nodes
+    cached_for_pid = list(_node_cache.get(pid, {}).items())
+    matched = _match_element(cached_for_pid, target_lower, role_lower)
+    if matched:
+        return matched
+
+    # Fetch tree and match
+    tree = get_application_tree(pid)
+    elements = [(el.get("id", ""), el) for el in tree.get("interactive_elements", [])]
+    return _match_element(elements, target_lower, role_lower)
 
 
 def inspect_ui_tree(pid: int | None = None, max_depth: int = 24) -> dict[str, Any]:
@@ -162,12 +168,17 @@ def interact_with_node(
             end_offset=end_offset,
         )
 
-    if effective_pid > 0 and not global_portal_session.is_mock:
-        settle_ms = max(80, settle_timeout_ms)
-        raw_res = wrap_with_delta(effective_pid, _execute, settle_ms=settle_ms)
-        return check_process_health_and_enrich(effective_pid, raw_res)
-    else:
-        return _execute()
+    target_ident = resolved_node_id or resolved_target
+    is_live = effective_pid > 0 and not global_portal_session.is_mock
+    settle_ms = max(80, settle_timeout_ms) if is_live else 0
+    raw_res = wrap_with_delta(
+        effective_pid if not global_portal_session.is_mock else 0,
+        _execute,
+        settle_ms=settle_ms,
+        action_name=act,
+        target=target_ident,
+    )
+    return check_process_health_and_enrich(effective_pid, raw_res)
 
 
 def click_element_by_label(

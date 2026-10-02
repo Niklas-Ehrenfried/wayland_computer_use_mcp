@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from PIL import Image
+
+from wayland_computer_use_mcp.config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +30,56 @@ except Exception as exc:
     logger.warning("GStreamer PyGObject bindings unavailable: %s", exc)
 
 DEFAULT_SAVE_DIR = Path.home() / ".cache" / "wayland-computer-use-mcp" / "screenshots"
+
+
+def capture_native_desktop_frame() -> Image.Image | None:
+    """Captures the active Wayland desktop frame using native compositor CLI utilities.
+
+    Supports:
+    - KDE Plasma: spectacle (-b -n -o <path>)
+    - wlroots / Sway: grim (<path>)
+    - GNOME: gnome-screenshot (-f <path>)
+    """
+    cfg = get_config()
+    if cfg.mock_mode or not os.environ.get("WAYLAND_DISPLAY"):
+        return None
+
+    cmd_template: list[str] | None = None
+    if shutil.which("spectacle"):
+        cmd_template = ["spectacle", "-b", "-n", "-o"]
+    elif shutil.which("grim"):
+        cmd_template = ["grim"]
+    elif shutil.which("gnome-screenshot"):
+        cmd_template = ["gnome-screenshot", "-f"]
+
+    if not cmd_template:
+        return None
+
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+            tmp_path = tf.name
+
+        cmd = [*cmd_template, tmp_path]
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3.0,
+        )
+        if proc.returncode == 0 and os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+            with Image.open(tmp_path) as img:
+                return img.convert("RGB")
+    except Exception as exc:
+        logger.debug("Native screenshot capture failed with %s: %s", cmd_template[0], exc)
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+    return None
 
 
 def crop_element(
@@ -76,7 +131,7 @@ class ScreenCastPipeline:
         except Exception as exc:
             logger.warning("GStreamer pipeline initialization failed: %s", exc)
 
-    def pull_frame(self) -> Image.Image | None:
+    def _pull_gst_frame(self) -> Image.Image | None:
         """Pulls the latest RGBA/RGB frame from the GStreamer appsink."""
         if not self._gst_appsink or not _GST_AVAILABLE:
             return None
@@ -115,11 +170,25 @@ class ScreenCastPipeline:
             else:
                 frame = Image.frombytes("RGBA", (w, h), map_info.data, "raw", "RGBA").convert("RGB")
             buf.unmap(map_info)
-            self._last_frame = frame
             return frame
         except Exception as exc:
             logger.debug("Failed to pull GStreamer sample: %s", exc)
             return None
+
+    def pull_frame(self) -> Image.Image | None:
+        """Pulls the latest frame from GStreamer appsink, falling back to native capture."""
+        frame = self._pull_gst_frame()
+        if frame is not None:
+            self._last_frame = frame
+            return frame
+
+        # Fallback to native compositor screenshot (spectacle, grim, gnome-screenshot)
+        native = capture_native_desktop_frame()
+        if native is not None:
+            self._last_frame = native
+            return native
+
+        return self._last_frame
 
     def save_frame(self, frame: Image.Image, filename: str = "latest_capture.png") -> str | None:
         """Persists captured frame to disk and updates last_saved_frame_path."""

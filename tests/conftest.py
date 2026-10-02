@@ -14,6 +14,8 @@ def isolate_session_state(request):
 
     is_live = request.node.get_closest_marker("live") is not None
     if not is_live:
+        prev_mock_cfg = get_config().mock_mode
+        prev_mock_session = global_portal_session._is_mock
         clear_node_cache()
         global_portal_session.target_pid = None
         get_config().mock_mode = True
@@ -29,7 +31,11 @@ def isolate_session_state(request):
             except Exception:
                 pass
         global_portal_session.target_pid = None
+        get_config().mock_mode = prev_mock_cfg
+        global_portal_session._is_mock = prev_mock_session
         clear_node_cache()
     else:
-        # For live desktop tests, allow the live fixture to manage process lifecycle
+        # For live desktop tests, ensure mock_mode is disabled
+        get_config().mock_mode = False
+        global_portal_session._is_mock = False
         yield

@@ -18,7 +18,7 @@ import pytest
 
 from wayland_computer_use_mcp.server import (
     batch_actions,
-    check_app_liveness,
+    capture_window_frame,
     drag,
     get_app_logs,
     hover,
@@ -26,9 +26,9 @@ from wayland_computer_use_mcp.server import (
     interact_with_node,
     launch_app,
     scroll,
-    take_labeled_screenshot,
     terminate_app,
 )
+from wayland_computer_use_mcp.tools.process_tools import check_app_liveness
 
 pytestmark = pytest.mark.live
 
@@ -40,7 +40,7 @@ def live_app():
     assert res["status"] == "launched"
     pid = res["pid"]
     assert pid > 0
-    time.sleep(1.2)  # Allow window to map, paint, and register with AT-SPI & KWin
+    time.sleep(0.6)  # Allow window to map, paint, and register with AT-SPI & KWin
 
     yield pid
 
@@ -95,7 +95,7 @@ def test_03_type_text_into_entry(live_app: int):
     assert "Antigravity" in type_res or "UI Changes" in type_res or "text" in type_res.lower()
 
     # Verify that the live UI label updated to reflect the new text
-    time.sleep(0.3)
+    time.sleep(0.25)
     tree2 = inspect_ui_tree(pid=pid)
     matching_lbl = next(
         (e for e in tree2["interactive_elements"] if "Antigravity Testing" in e.get("name", "")),
@@ -121,7 +121,7 @@ def test_04_combobox_selection(live_app: int):
     # 1. Click dropdown to open popover list
     click_res = interact_with_node(node_id=combo_elem["id"], action="click", pid=pid)
     assert "Clicked" in click_res or combo_elem["id"] in click_res
-    time.sleep(0.4)
+    time.sleep(0.1)
 
     # 2. Inspect tree to find the dropdown items in popover
     popover_tree = inspect_ui_tree(pid=pid, max_depth=30)
@@ -134,7 +134,7 @@ def test_04_combobox_selection(live_app: int):
     # 3. Click the staging item to select it
     sel_res = interact_with_node(node_id=staging_elem["id"], action="click", pid=pid)
     assert "Clicked" in sel_res or "Staging" in sel_res
-    time.sleep(0.3)
+    time.sleep(0.25)
 
     # 4. Verify that the UI tree and status label updated to Staging
     updated_tree = inspect_ui_tree(pid=pid)
@@ -170,7 +170,7 @@ def test_05_slider_adjustment(live_app: int):
     drag_res = drag(sx, sy, ex, sy)
     assert "Dragged" in drag_res
 
-    time.sleep(0.3)
+    time.sleep(0.25)
     updated_tree = inspect_ui_tree(pid=pid)
     slider_lbl = next(
         (e for e in updated_tree["interactive_elements"] if "Slider Value:" in e.get("name", "")),
@@ -200,7 +200,7 @@ def test_06_tab_navigation_and_reveals(live_app: int):
     # 1. Switch to Navigation tab
     target_id = nav_tab["name"] or nav_tab["id"]
     interact_with_node(target=target_id, action="click", pid=pid)
-    time.sleep(0.3)
+    time.sleep(0.25)
 
     tree_nav = inspect_ui_tree(pid=pid)
     assert any(
@@ -209,7 +209,7 @@ def test_06_tab_navigation_and_reveals(live_app: int):
 
     # 2. Navigate to Analytics page
     interact_with_node(target="Go to Analytics Page", action="click", pid=pid)
-    time.sleep(0.3)
+    time.sleep(0.25)
     tree_analytics = inspect_ui_tree(pid=pid)
     assert any(
         "Active Sub-Page: analytics" in e.get("name", "")
@@ -221,7 +221,7 @@ def test_06_tab_navigation_and_reveals(live_app: int):
 
     # 3. Navigate to Settings page
     interact_with_node(target="Go to Settings Page", action="click", pid=pid)
-    time.sleep(0.3)
+    time.sleep(0.25)
     tree_settings = inspect_ui_tree(pid=pid)
     assert any(
         "Active Sub-Page: settings" in e.get("name", "")
@@ -233,7 +233,7 @@ def test_06_tab_navigation_and_reveals(live_app: int):
 
     # 4. Navigate back to Overview page
     interact_with_node(target="Back to Overview Page", action="click", pid=pid)
-    time.sleep(0.3)
+    time.sleep(0.25)
     tree_overview = inspect_ui_tree(pid=pid)
     assert any(
         "Active Sub-Page: overview" in e.get("name", "")
@@ -256,7 +256,7 @@ def test_07_checkbox_toggle_and_state(live_app: int):
     assert data_tab is not None, "Data & Lists tab not found"
     target_id = data_tab["name"] or data_tab["id"]
     interact_with_node(target=target_id, action="click", pid=pid)
-    time.sleep(0.3)
+    time.sleep(0.25)
 
     tree_data = inspect_ui_tree(pid=pid)
     assert any(
@@ -277,7 +277,7 @@ def test_07_checkbox_toggle_and_state(live_app: int):
 
     # 1. Toggle off
     interact_with_node(node_id=chk_elem["id"], action="click", pid=pid)
-    time.sleep(0.3)
+    time.sleep(0.25)
     tree_toggled = inspect_ui_tree(pid=pid)
     assert any(
         "Hardware Acceleration: Disabled" in e.get("name", "")
@@ -286,7 +286,7 @@ def test_07_checkbox_toggle_and_state(live_app: int):
 
     # 2. Toggle back on
     interact_with_node(node_id=chk_elem["id"], action="click", pid=pid)
-    time.sleep(0.3)
+    time.sleep(0.25)
     tree_restored = inspect_ui_tree(pid=pid)
     assert any(
         "Hardware Acceleration: Enabled" in e.get("name", "")
@@ -308,7 +308,7 @@ def test_08_scroll_and_select_data_list(live_app: int):
     )
     if data_tab:
         interact_with_node(target=data_tab["name"] or data_tab["id"], action="click", pid=pid)
-        time.sleep(0.3)
+        time.sleep(0.25)
         tree = inspect_ui_tree(pid=pid)
 
     # 1. Click Row #02 while visible initially
@@ -318,7 +318,7 @@ def test_08_scroll_and_select_data_list(live_app: int):
     )
     assert row_02 is not None, "Dataset Row #02 should be initially visible"
     interact_with_node(node_id=row_02["id"], action="click", pid=pid)
-    time.sleep(0.3)
+    time.sleep(0.25)
     tree_after_r2 = inspect_ui_tree(pid=pid)
     assert any(
         "Selected Row: Dataset Row #02" in e.get("name", "")
@@ -332,7 +332,7 @@ def test_08_scroll_and_select_data_list(live_app: int):
     # Scroll down to reveal the bottom item (Row #20)
     scroll_down = scroll(0, -160)
     assert "Scrolled" in scroll_down
-    time.sleep(0.4)
+    time.sleep(0.35)
 
     scrolled_tree = inspect_ui_tree(pid=pid)
     row_20 = next(
@@ -347,7 +347,7 @@ def test_08_scroll_and_select_data_list(live_app: int):
 
     # 3. Click the bottom row (Row #20) and verify selection updates
     interact_with_node(node_id=row_20["id"], action="click", pid=pid)
-    time.sleep(0.3)
+    time.sleep(0.25)
     tree_after_r20 = inspect_ui_tree(pid=pid)
     assert any(
         "Selected Row: Dataset Row #20" in e.get("name", "")
@@ -357,7 +357,7 @@ def test_08_scroll_and_select_data_list(live_app: int):
     # 4. Scroll back up and verify we can re-select Row #02
     scroll_up = scroll(0, 160)
     assert "Scrolled" in scroll_up
-    time.sleep(0.4)
+    time.sleep(0.35)
     tree_top = inspect_ui_tree(pid=pid)
     row_02_again = next(
         (e for e in tree_top["interactive_elements"] if "Dataset Row #02" in e.get("name", "")),
@@ -365,7 +365,7 @@ def test_08_scroll_and_select_data_list(live_app: int):
     )
     assert row_02_again is not None, "Dataset Row #02 should be visible after scrolling back up"
     interact_with_node(node_id=row_02_again["id"], action="click", pid=pid)
-    time.sleep(0.3)
+    time.sleep(0.25)
     tree_restored = inspect_ui_tree(pid=pid)
     assert any(
         "Selected Row: Dataset Row #02" in e.get("name", "")
@@ -395,7 +395,7 @@ def test_10_crash_to_context_interception(live_app: int):
     assert diag_tab is not None, "Diagnostics tab not found in UI tree"
     target_id = diag_tab["name"] or diag_tab["id"]
     interact_with_node(target=target_id, action="click", pid=pid)
-    time.sleep(0.3)
+    time.sleep(0.25)
 
     updated_tree = inspect_ui_tree(pid=pid)
     crash_elem = next(
@@ -443,12 +443,19 @@ def test_11_batch_actions_and_fail_fast(live_app: int):
     assert len(fail_res["executed_steps"]) == 1
 
 
-def test_12_labeled_screenshot_set_of_marks(live_app: int):
-    """Tests capturing Set-of-Marks labeled screenshot with bounding tags."""
+def test_12_capture_window_frame_live(live_app: int):
+    """Tests capturing window frame of the live application."""
+    import os
+    from PIL import Image
+
     pid = live_app
-    screenshot = take_labeled_screenshot(pid=pid, save_artifact=True)
-    assert screenshot["element_count"] > 0
-    assert screenshot["image_path"]
+    capture = capture_window_frame(pid=pid, save_artifact=True)
+    assert len(capture) >= 2
+    assert capture.file_path
+    assert os.path.exists(capture.file_path)
+    with Image.open(capture.file_path) as img:
+        assert img.width > 0
+        assert img.height > 0
 
 
 def test_13_app_logs_and_event_stream(live_app: int):
@@ -467,7 +474,7 @@ def test_14_live_text_manipulation_suite(live_app: int):
     # Ensure Controls & Inputs tab (Tab 1) is active so e1 and its status label are visible
     try:
         interact_with_node(target="Controls & Inputs", action="click", pid=pid)
-        time.sleep(0.3)
+        time.sleep(0.25)
     except Exception:
         pass
     tree = inspect_ui_tree(pid=pid)
@@ -484,7 +491,7 @@ def test_14_live_text_manipulation_suite(live_app: int):
 
     # 1. Type specific text
     interact_with_node(node_id=entry_elem["id"], action="type", text="LiveClipboard123", pid=pid)
-    time.sleep(0.2)
+    time.sleep(0.05)
     tree_after_type = inspect_ui_tree(pid=pid)
     has_text = any(
         "LiveClipboard123" in e.get("name", "") for e in tree_after_type["interactive_elements"]
@@ -503,7 +510,7 @@ def test_14_live_text_manipulation_suite(live_app: int):
         or "text ''" in clear_res.lower()
         or entry_elem["id"] in clear_res
     )
-    time.sleep(0.2)
+    time.sleep(0.05)
     tree_after_clear = inspect_ui_tree(pid=pid)
     has_cleared = any(
         "Current Text: ''" in e.get("name", "") for e in tree_after_clear["interactive_elements"]

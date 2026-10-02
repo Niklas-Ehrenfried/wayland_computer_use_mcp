@@ -6,13 +6,13 @@ import base64
 import io
 import json
 import logging
-from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent
 
 from wayland_computer_use_mcp.a11y import get_application_tree
+from wayland_computer_use_mcp.artifacts import get_artifacts_dir
 from wayland_computer_use_mcp.compositors import (
     activate_and_raise_window as set_kwin_keep_above,
 )
@@ -184,7 +184,7 @@ def take_labeled_screenshot(
     embed_header = ""
     if save_artifact:
         try:
-            artifact_dir = Path(".agents/artifacts/screenshots")
+            artifact_dir = get_artifacts_dir("screenshots")
             artifact_dir.mkdir(parents=True, exist_ok=True)
             artifact_path = artifact_dir / "latest_labeled.png"
             artifact_path.write_bytes(raw_bytes)
@@ -222,11 +222,16 @@ def take_labeled_screenshot(
 def capture_window_frame(
     crop_box: list[int] | None = None,
     save_artifact: bool = True,
+    pid: int | None = None,
 ) -> list[Any]:
     """Captures the target window buffer and renders it inline for the agent."""
     _ensure_session_initialized()
+    effective_pid = pid or global_portal_session.target_pid
+    if effective_pid:
+        global_portal_session.target_pid = effective_pid
+
     if not global_portal_session.is_mock:
-        global_portal_session.check_active_app()
+        global_portal_session.check_active_app(effective_pid)
 
     if global_portal_session.target_pid:
         try:
@@ -243,7 +248,7 @@ def capture_window_frame(
     embed_path = ""
     if save_artifact:
         try:
-            artifact_dir = Path(".agents/artifacts/screenshots")
+            artifact_dir = get_artifacts_dir("screenshots")
             artifact_dir.mkdir(parents=True, exist_ok=True)
             artifact_path = artifact_dir / "latest_capture.png"
             artifact_path.write_bytes(raw_bytes)
@@ -310,5 +315,5 @@ def get_window_geometry(pid: int) -> dict[str, Any]:
 
 def register_visual_tools(mcp: FastMCP) -> None:
     """Registers visual grounding and screenshot tools onto FastMCP."""
-    mcp.tool()(take_labeled_screenshot)
     mcp.tool()(capture_window_frame)
+

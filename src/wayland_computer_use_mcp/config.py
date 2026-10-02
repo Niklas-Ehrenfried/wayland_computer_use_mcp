@@ -39,7 +39,7 @@ class Config:
     mock_mode: bool = False
 
     # Observable pause after visual mouse/keyboard actions (seconds)
-    action_delay_seconds: float = 0.4
+    action_delay_seconds: float = 0.1
 
     @classmethod
     def load(cls) -> Config:

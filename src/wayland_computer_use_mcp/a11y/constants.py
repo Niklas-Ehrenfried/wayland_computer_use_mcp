@@ -34,6 +34,10 @@ ROLE_PREFIX_MAP: dict[str, str] = {
     "static": "lbl",
     "spin button": "sb",
     "spinbutton": "sb",
+    "switch": "sw",
+    "list item": "li",
+    "tree item": "ti",
+    "table cell": "cell",
     "scroll bar": "scr",
     "scrollbar": "scr",
 }
@@ -44,6 +48,7 @@ INTERACTIVE_ROLES: set[str] = {
     "button",
     "toggle button",
     "togglebutton",
+    "switch",
     "entry",
     "text",
     "text box",
@@ -69,6 +74,9 @@ INTERACTIVE_ROLES: set[str] = {
     "link",
     "spin button",
     "spinbutton",
+    "list item",
+    "tree item",
+    "table cell",
 }
 
 CONTAINER_ROLES: set[str] = {

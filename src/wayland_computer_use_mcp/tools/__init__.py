@@ -6,6 +6,7 @@ from fastmcp import FastMCP
 
 from wayland_computer_use_mcp.tools.input_tools import register_input_tools
 from wayland_computer_use_mcp.tools.navigation_tools import register_navigation_tools
+from wayland_computer_use_mcp.tools.preset_tools import register_preset_tools
 from wayland_computer_use_mcp.tools.process_tools import register_process_tools
 from wayland_computer_use_mcp.tools.system_tools import register_system_tools
 from wayland_computer_use_mcp.tools.visual_tools import register_visual_tools
@@ -18,3 +19,4 @@ def register_all_tools(mcp: FastMCP) -> None:
     register_input_tools(mcp)
     register_visual_tools(mcp)
     register_system_tools(mcp)
+    register_preset_tools(mcp)

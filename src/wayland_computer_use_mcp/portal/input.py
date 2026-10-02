@@ -55,6 +55,14 @@ class InputDispatcher:
         if cfg.action_delay_seconds > 0:
             time.sleep(cfg.action_delay_seconds)
 
+    def _has_ei_pointer(self) -> bool:
+        ei = self._get_ei_client()
+        return bool(ei and (ei.pointer_abs_device or ei.pointer_device or ei.button_device))
+
+    def _has_ei_keyboard(self) -> bool:
+        ei = self._get_ei_client()
+        return bool(ei and ei.keyboard_device)
+
     def dispatch_click(self, x: int, y: int, button: str = "left") -> str:
         """Validates bounds and executes mouse click."""
         self._verify_preconditions()
@@ -68,20 +76,23 @@ class InputDispatcher:
             "middle": BTN_MIDDLE,
         }
         button_code = btn_map.get(button.lower(), BTN_LEFT)
-        ei_client = self._get_ei_client()
-
         offset_x, offset_y = self._get_offsets()
         target_x = float(offset_x + cx)
         target_y = float(offset_y + cy)
 
-        self.rd_client.notify_pointer_motion_absolute(target_x, target_y)
-        ei_client.pointer_motion_absolute(target_x, target_y)
-        time.sleep(0.02)
-        self.rd_client.notify_pointer_button(button_code, True)
-        ei_client.button_click(button_code)
-        self.rd_client.notify_pointer_button(button_code, False)
-        self._apply_action_delay()
+        if self._has_ei_pointer():
+            ei_client = self._get_ei_client()
+            ei_client.pointer_motion_absolute(target_x, target_y)
+            time.sleep(0.02)
+            ei_client.button_click(button_code)
+        else:
+            self.rd_client.notify_pointer_motion_absolute(target_x, target_y)
+            time.sleep(0.02)
+            self.rd_client.notify_pointer_button(button_code, True)
+            time.sleep(0.02)
+            self.rd_client.notify_pointer_button(button_code, False)
 
+        self._apply_action_delay()
         return f"Clicked {button} button at ({cx}, {cy})"
 
     def dispatch_double_click(self, x: int, y: int, button: str = "left") -> str:
@@ -97,23 +108,25 @@ class InputDispatcher:
             "middle": BTN_MIDDLE,
         }
         button_code = btn_map.get(button.lower(), BTN_LEFT)
-        ei_client = self._get_ei_client()
-
         offset_x, offset_y = self._get_offsets()
         target_x = float(offset_x + cx)
         target_y = float(offset_y + cy)
 
-        self.rd_client.notify_pointer_motion_absolute(target_x, target_y)
-        ei_client.pointer_motion_absolute(target_x, target_y)
-        time.sleep(0.02)
-        self.rd_client.notify_pointer_button(button_code, True)
-        self.rd_client.notify_pointer_button(button_code, False)
-        time.sleep(0.05)
-        self.rd_client.notify_pointer_button(button_code, True)
-        self.rd_client.notify_pointer_button(button_code, False)
-        ei_client.double_click(button_code)
-        self._apply_action_delay()
+        if self._has_ei_pointer():
+            ei_client = self._get_ei_client()
+            ei_client.pointer_motion_absolute(target_x, target_y)
+            time.sleep(0.02)
+            ei_client.double_click(button_code)
+        else:
+            self.rd_client.notify_pointer_motion_absolute(target_x, target_y)
+            time.sleep(0.02)
+            self.rd_client.notify_pointer_button(button_code, True)
+            self.rd_client.notify_pointer_button(button_code, False)
+            time.sleep(0.05)
+            self.rd_client.notify_pointer_button(button_code, True)
+            self.rd_client.notify_pointer_button(button_code, False)
 
+        self._apply_action_delay()
         return f"Double-clicked {button} button at ({cx}, {cy})"
 
     def dispatch_right_click(self, x: int, y: int) -> str:
@@ -127,16 +140,18 @@ class InputDispatcher:
         if self._is_mock():
             return f"Hovered pointer at ({cx}, {cy}) for {duration_ms}ms"
 
-        ei_client = self._get_ei_client()
         offset_x, offset_y = self._get_offsets()
         target_x = float(offset_x + cx)
         target_y = float(offset_y + cy)
 
-        self.rd_client.notify_pointer_motion_absolute(target_x, target_y)
-        ei_client.pointer_motion_absolute(target_x, target_y)
+        if self._has_ei_pointer():
+            ei_client = self._get_ei_client()
+            ei_client.pointer_motion_absolute(target_x, target_y)
+        else:
+            self.rd_client.notify_pointer_motion_absolute(target_x, target_y)
+
         time.sleep(max(10, duration_ms) / 1000.0)
         self._apply_action_delay()
-
         return f"Hovered pointer at ({cx}, {cy}) for {duration_ms}ms"
 
     def dispatch_drag(self, start_x: int, start_y: int, end_x: int, end_y: int) -> str:
@@ -147,35 +162,45 @@ class InputDispatcher:
         if self._is_mock():
             return f"Dragged from ({s_x}, {s_y}) to ({e_x}, {e_y})"
 
-        ei_client = self._get_ei_client()
         offset_x, offset_y = self._get_offsets()
         s_target_x = float(offset_x + s_x)
         s_target_y = float(offset_y + s_y)
         e_target_x = float(offset_x + e_x)
         e_target_y = float(offset_y + e_y)
 
-        # Move to start, mouse down, interpolate to end, mouse up
-        self.rd_client.notify_pointer_motion_absolute(s_target_x, s_target_y)
-        ei_client.pointer_motion_absolute(s_target_x, s_target_y)
-        time.sleep(0.05)
-        self.rd_client.notify_pointer_button(BTN_LEFT, True)
-        ei_client.button_down(BTN_LEFT)
-        time.sleep(0.05)
+        if self._has_ei_pointer():
+            ei_client = self._get_ei_client()
+            ei_client.pointer_motion_absolute(s_target_x, s_target_y)
+            time.sleep(0.05)
+            ei_client.button_down(BTN_LEFT)
+            time.sleep(0.05)
 
-        # Linear interpolation over 10 steps for smooth drag recognition
-        steps = 10
-        for i in range(1, steps + 1):
-            cur_x = s_target_x + (e_target_x - s_target_x) * (i / steps)
-            cur_y = s_target_y + (e_target_y - s_target_y) * (i / steps)
-            self.rd_client.notify_pointer_motion_absolute(cur_x, cur_y)
-            ei_client.pointer_motion_absolute(cur_x, cur_y)
-            time.sleep(0.01)
+            steps = 10
+            for i in range(1, steps + 1):
+                cur_x = s_target_x + (e_target_x - s_target_x) * (i / steps)
+                cur_y = s_target_y + (e_target_y - s_target_y) * (i / steps)
+                ei_client.pointer_motion_absolute(cur_x, cur_y)
+                time.sleep(0.01)
 
-        time.sleep(0.05)
-        self.rd_client.notify_pointer_button(BTN_LEFT, False)
-        ei_client.button_up(BTN_LEFT)
+            time.sleep(0.05)
+            ei_client.button_up(BTN_LEFT)
+        else:
+            self.rd_client.notify_pointer_motion_absolute(s_target_x, s_target_y)
+            time.sleep(0.05)
+            self.rd_client.notify_pointer_button(BTN_LEFT, True)
+            time.sleep(0.05)
+
+            steps = 10
+            for i in range(1, steps + 1):
+                cur_x = s_target_x + (e_target_x - s_target_x) * (i / steps)
+                cur_y = s_target_y + (e_target_y - s_target_y) * (i / steps)
+                self.rd_client.notify_pointer_motion_absolute(cur_x, cur_y)
+                time.sleep(0.01)
+
+            time.sleep(0.05)
+            self.rd_client.notify_pointer_button(BTN_LEFT, False)
+
         self._apply_action_delay()
-
         return f"Dragged from ({s_x}, {s_y}) to ({e_x}, {e_y})"
 
     def dispatch_scroll(self, dx: int, dy: int) -> str:
@@ -184,9 +209,13 @@ class InputDispatcher:
         if self._is_mock():
             return f"Scrolled dx={dx}, dy={dy}"
 
-        ei_client = self._get_ei_client()
         self.rd_client.notify_pointer_axis(float(dx), float(dy))
-        ei_client.scroll(float(dx), float(dy))
+        if self._has_ei_pointer():
+            try:
+                self._get_ei_client().scroll(float(dx), float(dy))
+            except Exception:
+                pass
+
         self._apply_action_delay()
         return f"Scrolled dx={dx}, dy={dy}"
 
@@ -264,20 +293,22 @@ class InputDispatcher:
         try:
             write_system_clipboard(text)
             time.sleep(0.05)
-            self.rd_client.notify_keyboard_keycode(KEY_LEFTCTRL, True)
-            ei_client = self._get_ei_client()
-            ei_client.key_press(KEY_LEFTCTRL, True)
-            time.sleep(0.02)
-
-            self.rd_client.notify_keyboard_keycode(KEY_V, True)
-            ei_client.key_press(KEY_V, True)
-            time.sleep(0.02)
-
-            self.rd_client.notify_keyboard_keycode(KEY_V, False)
-            ei_client.key_press(KEY_V, False)
-            time.sleep(0.02)
-
-            self.rd_client.notify_keyboard_keycode(KEY_LEFTCTRL, False)
-            ei_client.key_press(KEY_LEFTCTRL, False)
+            if self._has_ei_keyboard():
+                ei_client = self._get_ei_client()
+                ei_client.key_press(KEY_LEFTCTRL, True)
+                time.sleep(0.02)
+                ei_client.key_press(KEY_V, True)
+                time.sleep(0.02)
+                ei_client.key_press(KEY_V, False)
+                time.sleep(0.02)
+                ei_client.key_press(KEY_LEFTCTRL, False)
+            else:
+                self.rd_client.notify_keyboard_keycode(KEY_LEFTCTRL, True)
+                time.sleep(0.02)
+                self.rd_client.notify_keyboard_keycode(KEY_V, True)
+                time.sleep(0.02)
+                self.rd_client.notify_keyboard_keycode(KEY_V, False)
+                time.sleep(0.02)
+                self.rd_client.notify_keyboard_keycode(KEY_LEFTCTRL, False)
         except Exception as exc:
             logger.warning("Clipboard paste fallback failed: %s", exc)

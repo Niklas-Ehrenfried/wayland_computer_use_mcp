@@ -39,34 +39,36 @@ This document provides a technical component-by-component breakdown of `wayland-
 ## 2. Component Packages Breakdown
 
 ### A. FastMCP Server Entrypoint ([`server.py`](file:///home/niklas/Documents/Coding/Hobby/wayland_computer_use_mcp/src/wayland_computer_use_mcp/server.py))
-- **Role**: Exposes 23 tools, 1 prompt (`wayland_automation_guide`), and 1 resource (`wayland://system_prompt`) over the MCP JSON-RPC protocol via `mcp.server.fastmcp.FastMCP`.
-- **Modularity**: Imports and re-exports tool suites from `wayland_computer_use_mcp.tools.*`, preserving backwards compatibility with older single-module imports while maintaining a cleanly sorted `__all__`.
+- **Role**: Exposes 25 tools, 1 prompt (`wayland_automation_guide`), and 1 resource (`wayland://system_prompt`) over the MCP JSON-RPC protocol via `mcp.server.fastmcp.FastMCP`.
+- **Modularity**: Imports and re-exports tool suites from `wayland_computer_use_mcp.tools.*`, preserving backwards compatibility with older single-module imports while maintaining a cleanly sorted `__all__` containing strictly active tools. Internal helpers (`click_element_by_label`, `check_app_liveness`, `get_window_geometry`, `focus_window`) are cleanly designated as internal domain utilities.
 - **CLI Configuration**: Evaluates arguments (`--live`, `--virtual`, `--window-only`, `--fullscreen`, `-h`/`--help`, `-v`/`--version`) before launching the FastMCP transport loop.
 - **Graceful Lifecycle Cleanup**: Intercepts `SIGINT`, `SIGTERM`, and `atexit` to terminate spawned processes and safely release XDG portal sessions and PipeWire streams.
 
 ---
 
 ### B. Modular Tools Package ([`tools/`](file:///home/niklas/Documents/Coding/Hobby/wayland_computer_use_mcp/src/wayland_computer_use_mcp/tools/))
-Partitioned into 5 focused domain sub-modules (23 tools total):
+Partitioned into 6 focused domain sub-modules (25 tools total):
 1. **`input_tools.py`** (8 tools):
    - `click`, `double_click`, `right_click`, `hover`, `drag`, `scroll`, `type_text`, `key_combination`.
-   - All input actions wrap execution in `wrap_with_delta(pid)` to return real-time reactive UI feedback.
+   - All 8 input tools accept an optional `pid: int | None = None` parameter to enable explicit multi-app target switching.
+   - All input actions wrap execution in `wrap_with_delta(pid)` returning structured JSON UI deltas.
 2. **`navigation_tools.py`** (4 tools):
-   - `inspect_ui_tree(pid, max_depth)`: Returns the collapsed 1D interactive widget list with compact IDs (`b1`, `e1`, `c1`).
-   - `interact_with_node(node_id, action, text, settle_timeout_ms, ...)`: Core semantic-first dispatcher implementing the hybrid execution model with event settlement.
+   - `inspect_ui_tree(pid, max_depth)`: Returns the collapsed 1D interactive widget list with compact IDs (`b1`, `e1`, `c1`, `sw1`, `li1`).
+   - `interact_with_node(node_id, action, text, settle_timeout_ms, ...)`: Core semantic-first dispatcher implementing the hybrid execution model with event settlement and structured `ui_changes` diffs.
    - `batch_actions(actions, pid)`: Executes consecutive interactions atomically with step-by-step delta tracking without intermediate screenshot latency.
    - `watch_ui_events(pid, timeout_seconds)`: Streams accessibility events directly from AT-SPI2 D-Bus to track asynchronous UI changes.
-3. **`visual_tools.py`** (2 tools):
-   - `capture_window_frame(crop_box, save_artifact)`: Returns MCP in-memory `ImageContent` by default to prevent storage leaks, saving to managed rolling cache only when requested.
-   - `take_labeled_screenshot(save_artifact)`: Visual grounding overlay with numbered Set-of-Marks badges and cyan bounding boxes.
-   - Internal helpers: `focus_window(pid)`, `get_window_geometry(pid)`.
-4. **`process_tools.py`** (4 tools):
-   - `launch_app(script_path, args, cwd)`: Spawns Python GUI scripts with automatic venv discovery, returning the **initial interactive UI tree immediately** to eliminate an extra tool call.
+3. **`preset_tools.py`** (1 tool):
+   - `preset_workflow(action, name, description, steps, pid)`: Manages and executes reusable multi-step interaction macro presets (`list`, `run`, `view`, `save`, `delete`) stored as persistent JSON artifacts under `.agents/artifacts/presets/`.
+4. **`visual_tools.py`** (2 tools):
+   - `capture_window_frame(crop_box, save_artifact)`: Returns MCP in-memory `ImageContent` by default to prevent storage leaks, saving to `.agents/artifacts/screenshots/` only when requested.
+   - `take_labeled_screenshot(save_artifact)`: Set-of-Marks visual overlay directly consuming `tree["interactive_elements"]` for 100% complete coverage of all visible interactive widgets. Badges display compact semantic IDs (e.g. `[b1]`, `[e1]`, `[sw1]`) for zero-friction mental mapping to `interact_with_node`.
+5. **`process_tools.py`** (5 tools):
+   - `launch_app(target, args, restart, cwd)`: Spawns Python GUI scripts or system apps with automatic venv discovery, returning the **initial interactive UI tree immediately** to eliminate an extra tool call.
+   - `restart_app(pid)`: Gracefully terminates and re-launches an active process, preserving original launch arguments and working directory. Strictly validates process ownership: unmanaged or user-opened applications raise `PermissionError` to preserve desktop consistency.
    - `list_managed_apps()`: Lists all active sessions and prunes dead/externally-closed PIDs.
    - `terminate_app(pid)`: Clean termination (`SIGTERM` escalated to `SIGKILL`).
    - `get_app_logs(pid, lines)`: Retrieves console output and crash tracebacks from circular buffer.
-   - Internal helper: `check_app_liveness(pid)` with auto-pruning.
-5. **`system_tools.py`** (5 tools):
+6. **`system_tools.py`** (5 tools):
    - `clipboard_read`, `clipboard_write`: Native Wayland clipboard interaction via `wl-paste` / `wl-copy` with QDBus fallback.
    - `window_control(action, pid)`: State control (`minimize`, `maximize`, `restore`, `close`).
    - `install_to_desktop`, `uninstall_from_desktop`: Linux desktop launcher registration with git worktree detection.

@@ -100,13 +100,34 @@ def launch_app(
     }
 
 
-def restart_app(pid: int) -> dict[str, Any]:
-    """Gracefully terminates and re-launches an active process preserving arguments."""
-    minimize_window(pid)
+def restart_app(pid: int | None = None) -> dict[str, Any]:
+    """Gracefully terminates and re-launches an active process launched by this MCP session,
+    preserving its original launch command, arguments, and working directory.
+
+    NOTE: Only applications launched by this MCP server can be restarted. External applications
+    or user-opened windows cannot be restarted by the MCP server.
+    """
+    effective_pid = pid or global_portal_session.target_pid
+    if not effective_pid:
+        raise RuntimeError("No active managed application PID to restart.")
+
+    from wayland_computer_use_mcp.process import _lock, _processes
+
+    with _lock:
+        is_owned = effective_pid in _processes
+
+    if not is_owned:
+        raise PermissionError(
+            f"PID {effective_pid} was not launched by this MCP server. "
+            "Only MCP-launched applications can be restarted to preserve "
+            "consistency of user applications."
+        )
+
+    minimize_window(effective_pid)
     ensure_portal_dialogs_above()
     _ensure_session_initialized()
 
-    new_pid = restart_process(pid)
+    new_pid = restart_process(effective_pid)
     global_portal_session.target_pid = new_pid
     try:
         from wayland_computer_use_mcp.tools.visual_tools import focus_window
@@ -126,7 +147,7 @@ def restart_app(pid: int) -> dict[str, Any]:
 
     return {
         "status": "restarted",
-        "old_pid": pid,
+        "old_pid": effective_pid,
         "new_pid": new_pid,
         "session_handle": global_portal_session.session_handle,
         "restore_token": global_portal_session.restore_token,
@@ -162,7 +183,7 @@ def list_managed_apps() -> dict[str, Any]:
 
 
 def check_app_liveness(pid: int | None = None) -> dict[str, Any]:
-    """Verifies if an application process is active, alive, and responsive."""
+    """Internal helper: verifies if an application process is active, alive, and responsive."""
     prune_dead_processes()
     effective_pid = pid or global_portal_session.target_pid
     if not effective_pid:
@@ -190,6 +211,7 @@ def get_app_logs(pid: int | None = None, lines: int = 50) -> str:
 def register_process_tools(mcp: FastMCP) -> None:
     """Registers application process lifecycle tools onto the FastMCP server."""
     mcp.tool()(launch_app)
+    mcp.tool()(restart_app)
     mcp.tool()(terminate_app)
     mcp.tool()(get_app_logs)
     mcp.tool()(list_managed_apps)

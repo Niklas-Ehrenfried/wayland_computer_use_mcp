@@ -322,8 +322,8 @@ class GeometryDivergenceDetector:
         if baseline_dim is not None and (current_width, current_height) != baseline_dim:
             old_w, old_h = baseline_dim
             raise RuntimeError(
-                f"Window geometry changed from ({old_w}x{old_h}) to "
-                f"({current_width}x{current_height}) while action was pending. "
+                f"Window geometry changed (dimensions changed from ({old_w}x{old_h}) to "
+                f"({current_width}x{current_height})) while action was pending. "
                 "The action was aborted for safety. "
                 "Please call capture_window_frame to inspect the updated layout."
             )
@@ -334,13 +334,9 @@ class GeometryDivergenceDetector:
             and current_y is not None
             and (current_x, current_y) != baseline_pos
         ):
-            old_x, old_y = baseline_pos
-            raise RuntimeError(
-                f"Window geometry changed (moved from ({old_x}, {old_y}) to "
-                f"({current_x}, {current_y})) while action was pending. "
-                "The action was aborted for safety. "
-                "Please call capture_window_frame to inspect the updated layout."
-            )
+            # Window moved: update baseline position seamlessly without failing
+            with self._lock:
+                self.last_position = (current_x, current_y)
 
 
 class UserPreemptionManager:

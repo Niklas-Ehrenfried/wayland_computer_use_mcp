@@ -127,8 +127,8 @@ def format_delta_markdown(
 
     for item in modified:
         node_id = item["id"]
-        role = item["role"]
-        desc = item["description"]
+        role = item.get("role", "widget")
+        desc = item.get("description", "")
         lines.append(f"• {node_id} [{role}]: {desc}")
 
     if appeared:
@@ -163,22 +163,85 @@ def format_delta_markdown(
     return "\n".join(lines)
 
 
+class InteractionResult(dict):
+    """Structured dictionary representation of an interaction and UI delta.
+
+    Supports key-based access (`res["status"]`, `res["ui_changes"]`, `res["result"]`),
+    as well as membership tests (`"Clicked" in res`, `"b1" in res`) and string methods
+    (`.lower()`, equality) for full backwards-compatibility with test suites and LLM parsers.
+    """
+
+    def __contains__(self, item: Any) -> bool:
+        if super().__contains__(item):
+            return True
+        if isinstance(item, str):
+            res_str = self.get("result", "")
+            target_str = self.get("target") or ""
+            warning_str = self.get("warning") or ""
+            if item in res_str or item in target_str or item in warning_str:
+                return True
+            # Check within ui_changes stringified content
+            return item in str(self.get("ui_changes", {})) or item in str(self)
+        return False
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, str):
+            return self.get("result") == other or str(self) == other
+        return super().__eq__(other)
+
+    def lower(self) -> str:
+        return str(self).lower()
+
+    def strip(self, *args: Any, **kwargs: Any) -> str:
+        return str(self).strip(*args, **kwargs)
+
+    def startswith(self, prefix: str, *args: Any) -> bool:
+        return str(self).startswith(prefix, *args)
+
+    def endswith(self, suffix: str, *args: Any) -> bool:
+        return str(self).endswith(suffix, *args)
+
+    def __str__(self) -> str:
+        delta = self.get("ui_changes", {})
+        delta_str = format_delta_markdown(delta) if isinstance(delta, dict) else ""
+        return f"{self.get('result', '')}{delta_str}"
+
+
 def wrap_with_delta(
     pid: int,
-    action_fn: Callable[[], str],
+    action_fn: Callable[[], str | dict[str, Any]],
     settle_ms: int = 80,
     max_delta_items: int = 20,
-) -> str:
-    """Executes action_fn while tracking pre- and post-action UI deltas."""
+    action_name: str = "interaction",
+    target: str | None = None,
+) -> InteractionResult:
+    """Executes action_fn while tracking pre- and post-action UI deltas,
+    returning a structured InteractionResult dictionary.
+    """
     if pid <= 0:
-        return action_fn()
+        raw = action_fn()
+        raw_str = raw if isinstance(raw, str) else raw.get("result", str(raw))
+        return InteractionResult(
+            status="success",
+            action=action_name,
+            target=target,
+            result=raw_str,
+            ui_changes={"modified": [], "appeared": [], "hidden": []},
+        )
 
     before = snapshot_interactive_state(pid)
-    result = action_fn()
+    raw = action_fn()
     if settle_ms > 0:
         time.sleep(settle_ms / 1000.0)
     after = snapshot_interactive_state(pid)
 
     delta = compute_ui_delta(before, after)
-    delta_str = format_delta_markdown(delta, max_items=max_delta_items)
-    return f"{result}{delta_str}"
+    raw_str = raw if isinstance(raw, str) else raw.get("result", str(raw))
+
+    return InteractionResult(
+        status="success",
+        action=action_name,
+        target=target,
+        result=raw_str,
+        ui_changes=delta,
+    )

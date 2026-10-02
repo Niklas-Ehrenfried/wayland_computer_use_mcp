@@ -70,9 +70,7 @@ def test_batch_actions_with_per_step_delta(monkeypatch):
     from wayland_computer_use_mcp.portal import global_portal_session
 
     monkeypatch.setattr(global_portal_session, "_is_mock", True)
-    monkeypatch.setattr(
-        global_portal_session, "dispatch_hover", lambda *args, **kwargs: "Hovered"
-    )
+    monkeypatch.setattr(global_portal_session, "dispatch_hover", lambda *args, **kwargs: "Hovered")
     batch = [
         {"action": "wait", "ms": 50},
         {"action": "hover", "x": 10, "y": 10},
@@ -82,6 +80,3 @@ def test_batch_actions_with_per_step_delta(monkeypatch):
     assert res["executed_steps_count"] == 2
     assert len(res["results"]) == 2
     assert "Waited 50ms" in res["results"][0]
-
-
-

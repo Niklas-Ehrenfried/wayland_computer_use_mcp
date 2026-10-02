@@ -2,19 +2,20 @@
 
 from wayland_computer_use_mcp.server import (
     capture_window_frame,
-    check_app_liveness,
     click,
     drag,
     mcp,
     scroll,
     type_text,
 )
+from wayland_computer_use_mcp.tools.process_tools import check_app_liveness
 
 
 async def test_registered_tools():
-    # Active high-leverage exposed MCP tools
+    # Active high-leverage exposed MCP tools (24 tools total)
     exposed_tool_names = [
         "launch_app",
+        "restart_app",
         "terminate_app",
         "get_app_logs",
         "capture_window_frame",
@@ -29,7 +30,6 @@ async def test_registered_tools():
         "scroll",
         "type_text",
         "key_combination",
-        "take_labeled_screenshot",
         "clipboard_read",
         "clipboard_write",
         "install_to_desktop",
@@ -37,6 +37,7 @@ async def test_registered_tools():
         "window_control",
         "list_managed_apps",
         "watch_ui_events",
+        "preset_workflow",
     ]
 
     tools = await mcp.list_tools()
@@ -45,13 +46,15 @@ async def test_registered_tools():
     for name in exposed_tool_names:
         assert name in registered_names, f"Expected tool '{name}' to be registered"
 
+    assert len(registered_names) == 24
+
     # Retired / consolidated tools should not pollute the exposed MCP surface
     retired_tools = [
-        "restart_app",
         "check_app_liveness",
         "click_element_by_label",
         "get_window_geometry",
         "focus_window",
+        "take_labeled_screenshot",
     ]
     for name in retired_tools:
         assert name not in registered_names, f"Tool '{name}' should be consolidated/internal"

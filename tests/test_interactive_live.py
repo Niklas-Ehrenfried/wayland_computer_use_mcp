@@ -20,14 +20,14 @@ import pytest
 
 from wayland_computer_use_mcp.server import (
     batch_actions,
-    check_app_liveness,
+    capture_window_frame,
     get_app_logs,
     inspect_ui_tree,
     interact_with_node,
     launch_app,
-    take_labeled_screenshot,
     terminate_app,
 )
+from wayland_computer_use_mcp.tools.process_tools import check_app_liveness
 
 
 @pytest.mark.live
@@ -155,10 +155,10 @@ def test_visible_interactive_gui_workflow():
                     or "Activated" in crash_res
                 )
 
-        # 11. Take labeled Set-of-Marks screenshot
-        screenshot = take_labeled_screenshot(pid=pid, save_artifact=True)
-        assert screenshot["element_count"] > 0
-        assert screenshot["image_path"]
+        # 11. Capture window frame
+        capture = capture_window_frame(pid=pid, save_artifact=True)
+        assert len(capture) >= 2
+        assert capture.file_path
 
         # 12. Check console logs
         logs = get_app_logs(pid=pid, lines=25)

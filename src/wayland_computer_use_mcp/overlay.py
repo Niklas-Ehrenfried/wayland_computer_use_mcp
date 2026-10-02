@@ -73,7 +73,8 @@ def draw_labeled_overlay(
 
         # Bounding outline
         draw.rectangle([x, y, x + w, y + h], outline=(0, 206, 201, 220), width=2)
-        tag = f"[{idx}]"
+        node_id = str(el.get("id") or idx)
+        tag = f"[{node_id}]"
         bbox = draw.textbbox((0, 0), tag, font=font)
         tw = bbox[2] - bbox[0]
         th = bbox[3] - bbox[1]
@@ -90,6 +91,7 @@ def draw_labeled_overlay(
         legend.append(
             {
                 "index": idx,
+                "id": node_id,
                 "role": el.get("role", "widget"),
                 "name": el.get("name", ""),
                 "center": [cx, cy],
