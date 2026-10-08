@@ -48,4 +48,5 @@ jobs:
         run: uv build
 
       - name: Validate Distribution Artifacts
-        run: uv run twine check dist/*
+        run: uvx twine check dist/*
+
