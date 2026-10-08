@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [
-    { name = "DeepMind & Antigravity Community" }
+    { name = "Niklas Ehrenfried" }
 ]
 keywords = ["wayland", "mcp", "fastmcp", "pipewire", "libei", "at-spi", "desktop-use", "testing"]
 classifiers = [
