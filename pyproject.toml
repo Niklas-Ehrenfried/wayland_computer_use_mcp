@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "wayland-computer-use-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "FastMCP server for interactive Wayland window/desktop streaming, semantic UI inspection, boundary-clamped input injection, and desktop integration."
 readme = "README.md"
 requires-python = ">=3.11"
