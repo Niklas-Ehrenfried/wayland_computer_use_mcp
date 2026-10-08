@@ -138,6 +138,7 @@ class LibEIWrapper:
 
     def __init__(self) -> None:
         self.available = False
+        self._cdll: Any = None
         try:
             self._cdll = ctypes.CDLL("libei.so.1")
             self._setup_prototypes()

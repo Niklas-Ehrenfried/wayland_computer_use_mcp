@@ -60,8 +60,8 @@ def test_eiclient_mocked_cdll(monkeypatch):
     mock_c.ei_dispatch.return_value = 0
     mock_c.ei_get_event.return_value = None  # No events in poll loop
 
-    monkeypatch.setattr(libei, "available", True)
-    monkeypatch.setattr(libei, "_cdll", mock_c)
+    monkeypatch.setattr(libei, "available", True, raising=False)
+    monkeypatch.setattr(libei, "_cdll", mock_c, raising=False)
 
     client = EIClient(fd=42)
     assert client.ctx == 0x1000
@@ -148,8 +148,8 @@ def test_eiclient_event_handling(monkeypatch):
         )
     )
 
-    monkeypatch.setattr(libei, "available", True)
-    monkeypatch.setattr(libei, "_cdll", mock_c)
+    monkeypatch.setattr(libei, "available", True, raising=False)
+    monkeypatch.setattr(libei, "_cdll", mock_c, raising=False)
 
     client = EIClient(fd=55)
     assert client.pointer_abs_device == mock_dev
