@@ -25,6 +25,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libcairo2-dev \
             libgirepository1.0-dev \
             gir1.2-glib-2.0 \
             gir1.2-gtk-4.0 \
