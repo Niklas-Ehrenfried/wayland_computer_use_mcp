@@ -62,6 +62,7 @@ ignore = ["B008"]  # Allow FastMCP tool decorators and default arg patterns
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "--cov=wayland_computer_use_mcp --cov-branch --cov-report=term-missing"
 markers = [
     "live: live interactive tests that interact with the desktop session",
     "unit: fast unit tests that run in background",

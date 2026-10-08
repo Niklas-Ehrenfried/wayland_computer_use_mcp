@@ -51,7 +51,9 @@ def test_screencast_pipeline_lifecycle(tmp_path, monkeypatch):
 
 
 def test_input_dispatcher_mock_actions():
-    """Verifies all input gestures execute cleanly with proper validation."""
+    """Verifies all input gestures execute cleanly via single-source libei
+    when devices are active.
+    """
     mock_rd = MagicMock(spec=RemoteDesktopClient)
     mock_ei = MagicMock()
 
@@ -63,11 +65,12 @@ def test_input_dispatcher_mock_actions():
         get_ei_client_fn=lambda: mock_ei,
     )
 
-    # Click
+    # Click - single source routes to EI, not RemoteDesktop
     res = dispatcher.dispatch_click(50, 50, button="left")
     assert "Clicked left" in res
-    mock_rd.notify_pointer_motion_absolute.assert_called_with(50.0, 50.0)
+    mock_ei.pointer_motion_absolute.assert_called_with(50.0, 50.0)
     mock_ei.button_click.assert_called()
+    mock_rd.notify_pointer_motion_absolute.assert_not_called()
 
     # Double click
     res = dispatcher.dispatch_double_click(50, 50, button="left")
@@ -81,6 +84,7 @@ def test_input_dispatcher_mock_actions():
     # Hover
     res = dispatcher.dispatch_hover(70, 70, duration_ms=20)
     assert "Hovered pointer" in res
+    mock_ei.pointer_motion_absolute.assert_called_with(70.0, 70.0)
 
     # Drag
     res = dispatcher.dispatch_drag(10, 10, 80, 80)
@@ -91,7 +95,7 @@ def test_input_dispatcher_mock_actions():
     # Scroll
     res = dispatcher.dispatch_scroll(0, 5)
     assert "Scrolled dx=0, dy=5" in res
-    mock_rd.notify_pointer_axis.assert_called_with(0.0, 5.0)
+    mock_ei.scroll.assert_called_with(0.0, 5.0)
 
     # Type text - fast path
     mock_ei.type_char.return_value = True
@@ -101,6 +105,41 @@ def test_input_dispatcher_mock_actions():
     # Key combination
     res = dispatcher.dispatch_key_combination(["ctrl", "c"])
     assert "Dispatched key combination: ctrl+c" in res
+
+
+def test_input_dispatcher_fallback_rd_client():
+    """Verifies that actions fall back to RemoteDesktopClient when EI devices are unavailable."""
+    mock_rd = MagicMock(spec=RemoteDesktopClient)
+    mock_ei = MagicMock()
+    mock_ei.pointer_abs_device = None
+    mock_ei.pointer_device = None
+    mock_ei.button_device = None
+    mock_ei.scroll_device = None
+    mock_ei.keyboard_device = None
+
+    dispatcher = InputDispatcher(
+        rd_client=mock_rd,
+        verify_preconditions_fn=lambda: None,
+        get_offsets_fn=lambda: (0, 0),
+        is_mock_fn=lambda: False,
+        get_ei_client_fn=lambda: mock_ei,
+    )
+
+    # Click fallback
+    res = dispatcher.dispatch_click(50, 50, button="left")
+    assert "Clicked left" in res
+    mock_rd.notify_pointer_motion_absolute.assert_called_with(50.0, 50.0)
+    mock_rd.notify_pointer_button.assert_called()
+
+    # Hover fallback
+    res = dispatcher.dispatch_hover(70, 70, duration_ms=20)
+    assert "Hovered pointer" in res
+    mock_rd.notify_pointer_motion_absolute.assert_called_with(70.0, 70.0)
+
+    # Scroll fallback
+    res = dispatcher.dispatch_scroll(0, 5)
+    assert "Scrolled dx=0, dy=5" in res
+    mock_rd.notify_pointer_axis.assert_called_with(0.0, 5.0)
 
 
 def test_input_dispatcher_long_text_clipboard_paste(monkeypatch):

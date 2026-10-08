@@ -36,9 +36,10 @@ This document defines the roadmap, completed milestones, architectural guideline
   - State machine tracking emulating devices per handle and `@property is_connected`.
 
 ### B. Hybrid Semantic-First Execution Model
-- [x] Real-time visual tracking: Always moves cursor visibly over target (`hover(cx, cy)`) for human transparency and spatial verification.
-- [x] Programmatic AT-SPI execution: Direct invocation of `DoAction`, `EditableText`, and `Text` interfaces.
-- [x] Physical fallback: Custom widgets, dropdown popovers (`GtkDropDown`), checkboxes, and sliders fall back seamlessly to coordinate clicks and keypresses.
+- [x] Level 1 Programmatic Value Setting: `action="set_value"` on `scale`/`slider` widgets updates `org.a11y.atspi.Value.CurrentValue` atomically over D-Bus with zero mouse movement.
+- [x] Semantic Parent Bubbling: Automatically traverses widget ancestor hierarchy when clicking static text labels or inner icons, activating parent actionable containers (`button`, `checkbox`, `Selection.SelectChild` on `list`/`table`) programmatically with zero physical mouse movement.
+- [x] Programmatic AT-SPI execution: Direct invocation of `DoAction`, `EditableText`, `Value`, `Selection`, and `Text` interfaces.
+- [x] Physical fallback: Custom widgets, dropdown popovers (`GtkDropDown`), and unexposed canvas controls fall back seamlessly to coordinate clicks and keypresses.
 - [x] Actionable Delta-to-Delta Navigation: `delta.py` outputs full node ID, role, name/label, and states (`focused`, `checked`, `selected`) without premature truncation, allowing agents to chain interactions without querying `inspect_ui_tree`.
 - [x] Zero-Call Startup: `launch_app` immediately returns the initial 1D interactive element tree.
 - [x] Full Set-of-Marks Visual Coverage: Labeled screenshots consume `tree["interactive_elements"]` directly (including GTK4 `switch`, `list item`, `tree item`, `table cell`), rendering compact semantic IDs (`[b1]`, `[e1]`, `[sw1]`) on badges.

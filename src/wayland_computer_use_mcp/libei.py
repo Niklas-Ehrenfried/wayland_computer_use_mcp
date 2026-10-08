@@ -514,10 +514,14 @@ class EIClient:
                     else (1 if dx > 0 else -1 if dx < 0 else 0)
                 )
                 if steps_x != 0 or steps_y != 0:
+                    # In libei, 120 represents one standard mouse wheel click.
                     c.ei_device_scroll_discrete(
-                        dev, ctypes.c_int32(steps_x), ctypes.c_int32(steps_y)
+                        dev,
+                        ctypes.c_int32(steps_x * 120),
+                        ctypes.c_int32(steps_y * 120),
                     )
-            c.ei_device_scroll_delta(dev, ctypes.c_double(dx), ctypes.c_double(dy))
+            else:
+                c.ei_device_scroll_delta(dev, ctypes.c_double(dx), ctypes.c_double(dy))
             c.ei_device_frame(dev, t)
             self._stop_emulating(dev)
 

@@ -89,9 +89,12 @@ Partitioned into 6 focused domain sub-modules (25 tools total):
 - **`actions.py`**:
   - **Hybrid Semantic-First Execution Dispatcher**:
     1. In-built auto-scrolling: If target widget is outside the visible viewport, automatically dispatches `scroll()` so it enters the viewport.
-    2. Real-time visual tracking: Visibly moves cursor over target (`hover(cx, cy)`) for human transparency and spatial verification.
-    3. Programmatic execution: Invokes `org.a11y.atspi.Action.DoAction(0)`, `EditableText.SetTextContents()`, or `Text.SetSelection()`.
-    4. Physical fallback: For custom widgets, dropdown popovers (`GtkDropDown`), checkboxes, or when AT-SPI calls fail, falls back seamlessly to coordinate clicks and keyboard events.
+    2. Level 1 programmatic execution:
+       - Direct activations: Invokes `org.a11y.atspi.Action.DoAction(0)` on buttons, checkboxes, tabs, and menu items.
+       - Range controls: Sets `action="set_value"` atomically via `org.a11y.atspi.Value` (`CurrentValue`) without physical drag gestures.
+       - Text editing: Modifies text via `EditableText.SetTextContents()` or `Text.SetSelection()`.
+       - Semantic Parent Bubbling: If an agent targets a static child label/icon lacking an action interface, walks up the ancestor hierarchy to trigger the parent container (`push button`, `check box`, or `Selection.SelectChild` on `list`/`table`) directly over D-Bus with zero mouse movement.
+    3. Level 2 physical fallback: For custom canvas widgets, dropdown popovers (`GtkDropDown`), or when AT-SPI calls fail, falls back seamlessly to coordinate clicks and keyboard events with desktop offset compensation.
 - **`constants.py`**: Role mappings, prefix tables (`b` for buttons, `e` for entries, `c` for comboboxes, `s` for sliders), and ignored roles.
 - **`synthetic.py`**: Fallback mock tree generator for testing without an active AT-SPI bus.
 
@@ -129,7 +132,8 @@ Modular abstraction layer supporting heterogeneous Wayland compositors:
 ### F. Low-Level EIS Driver ([`libei.py`](file:///home/niklas/Documents/Coding/Hobby/wayland_computer_use_mcp/src/wayland_computer_use_mcp/libei.py))
 - Direct ctypes bindings to `libei.so.1` for Emulated Input Server injection on `seat0`.
 - Emulation state lifecycle: Tracks emulating devices per handle (`_start_emulating`, `_stop_emulating`).
-- Discrete scrolling support: Calls `ei_device_scroll_discrete(dev, steps_x, steps_y)` alongside `ei_device_scroll_delta` to ensure GTK4 and Wayland compositors register wheel ticks immediately.
+- Discrete scrolling support: Calls `ei_device_scroll_discrete(dev, steps_x * 120, steps_y * 120)` adhering strictly to the libei 120-unit standard without conflicting simultaneous delta events.
+- Positive dy represents scrolling down (increasing Y); negative dy represents scrolling up.
 - Clean connection management: Exposes `@property is_connected` and cleans up file descriptors and contexts upon `close()`.
 
 ---
@@ -143,9 +147,9 @@ Modular abstraction layer supporting heterogeneous Wayland compositors:
 ## 3. Interaction Paradigm: Hybrid Semantic-First Model
 
 The server enforces a **Hybrid Semantic-First Execution Model**:
-1. **Observable Cursor Tracking**: Every interaction visibly hovers the pointer over the target widget `(cx, cy)` prior to actuation, giving human operators visual feedback in live mode and validating spatial coordinates.
-2. **Programmatic AT-SPI Execution**: Clicks, text entries, and selections execute atomically via AT-SPI D-Bus interfaces (`DoAction`, `EditableText`, `Text`) whenever supported.
-3. **Physical Fallback for Complex Surfaces**: Popover menus (`GtkDropDown`), list item selections, and custom canvas widgets fall back smoothly to physical coordinate clicks and keypresses.
+1. **Unobtrusive Programmatic AT-SPI Execution**: Level 1 actions (`DoAction`, `EditableText`, `Text`) execute atomically via D-Bus without moving the user's physical mouse pointer, eliminating cursor hijacking and false hover triggers.
+2. **Deterministic Physical Fallback**: For custom widgets, canvas elements, or when AT-SPI calls fail, falls back smoothly to clamped coordinate clicks and keypresses with full multi-monitor desktop offset support.
+3. **Multi-Monitor Global Geometry**: Full unified desktop coordinates `(wx, wy)` without modulo wrapping, correctly projecting clicks and captures onto any monitor configuration.
 4. **Continuous Delta-to-Delta Flow**: Actions return actionable UI deltas with full widget descriptors, eliminating redundant full-tree re-queries.
 
 ---
@@ -154,9 +158,9 @@ The server enforces a **Hybrid Semantic-First Execution Model**:
 
 | Test Suite | File | Tests | Pass Rate |
 | :--- | :--- | :--- | :--- |
-| **Live GUI E2E Suite** | [`tests/test_live_example_app.py`](file:///home/niklas/Documents/Coding/Hobby/wayland_computer_use_mcp/tests/test_live_example_app.py) | 14 | **100%** (14/14) |
-| **Unit & Non-Live Tests** | `tests/test_*.py` | 114+ | **100%** |
+| **Live GUI E2E Suite** | [`tests/test_live_example_app.py`](file:///home/niklas/Documents/Coding/Hobby/wayland_computer_use_mcp/tests/test_live_example_app.py) | 15 | **100%** (15/15) |
+| **Unit & Non-Live Tests** | `tests/test_*.py` | 124 | **100%** (124/124) |
+| **Host AT-SPI Shielding** | `tests/test_virtual_session.py` | 1 | **100%** (Isolated XDG_RUNTIME_DIR) |
 | **Ruff Code Style** | `src/`, `tests/` | 61 files | **100%** Clean (0 errors) |
 | **Packaging (PEP 561 / Twine)**| `pyproject.toml`, `py.typed` | Validated | **100%** PASSED |
-
-| **Vulture Dead Code** | `src/` | 58 files | **0 Dead Code** | Code 0 |
+| **Vulture Dead Code** | `src/` | 58 files | **0 Dead Code** (Code 0) |

@@ -326,11 +326,11 @@ def test_08_scroll_and_select_data_list(live_app: int):
     ), "Selecting Row #02 did not update Selected Row status label"
 
     # 2. Hover over the list viewport to direct scroll events to the ScrolledWindow
-    hover(row_02["center"][0], row_02["center"][1])
+    hover(row_02["center"][0], row_02["center"][1], pid=pid)
     time.sleep(0.1)
 
     # Scroll down to reveal the bottom item (Row #20)
-    scroll_down = scroll(0, -160)
+    scroll_down = scroll(0, 300, pid=pid)
     assert "Scrolled" in scroll_down
     time.sleep(0.35)
 
@@ -355,7 +355,7 @@ def test_08_scroll_and_select_data_list(live_app: int):
     ), "Selecting scrolled Row #20 did not update Selected Row status label"
 
     # 4. Scroll back up and verify we can re-select Row #02
-    scroll_up = scroll(0, 160)
+    scroll_up = scroll(0, -300, pid=pid)
     assert "Scrolled" in scroll_up
     time.sleep(0.35)
     tree_top = inspect_ui_tree(pid=pid)
@@ -446,6 +446,7 @@ def test_11_batch_actions_and_fail_fast(live_app: int):
 def test_12_capture_window_frame_live(live_app: int):
     """Tests capturing window frame of the live application."""
     import os
+
     from PIL import Image
 
     pid = live_app
@@ -520,3 +521,73 @@ def test_14_live_text_manipulation_suite(live_app: int):
     # 4. Drag-select visual gesture across text box
     drag_res = interact_with_node(node_id=entry_elem["id"], action="drag_select", pid=pid)
     assert "Drag-selected" in drag_res or "drag" in drag_res.lower()
+
+
+def test_15_set_value_and_semantic_parent_bubbling(live_app: int):
+    """Component: Level 1 set_value on slider and Semantic Parent Bubbling on child labels."""
+    pid = live_app
+
+    # 1. Switch back to Controls tab (t1) if needed
+    tree = inspect_ui_tree(pid=pid)
+    controls_tab = next(
+        (
+            e
+            for e in tree["interactive_elements"]
+            if "Controls" in e.get("name", "") or e.get("id") == "t1"
+        ),
+        None,
+    )
+    if controls_tab:
+        interact_with_node(node_id=controls_tab["id"], action="click", pid=pid)
+        time.sleep(0.1)
+
+    # 2. Test action="set_value" on slider s1
+    tree = inspect_ui_tree(pid=pid)
+    slider_elem = next(
+        (
+            e
+            for e in tree["interactive_elements"]
+            if e["id"] == "s1" or e.get("role") in ("scale", "slider")
+        ),
+        None,
+    )
+    assert slider_elem is not None, "Slider s1 not found"
+    val_res = interact_with_node(node_id=slider_elem["id"], action="set_value", value=88.0, pid=pid)
+    assert "88.0" in val_res or "value" in val_res.lower()
+    time.sleep(0.1)
+
+    updated_tree = inspect_ui_tree(pid=pid)
+    slider_lbl = next(
+        (
+            e
+            for e in updated_tree["interactive_elements"]
+            if "Slider Value: 88.0" in e.get("name", "")
+        ),
+        None,
+    )
+    assert slider_lbl is not None, "Slider value was not updated to 88.0 via AT-SPI CurrentValue!"
+
+    # 3. Test Semantic Parent Bubbling:
+    # Find child label inside button b1 or any button
+    btn_elem = next(
+        (
+            e
+            for e in updated_tree["interactive_elements"]
+            if e["id"] == "b1" or "Click Me" in e.get("name", "")
+        ),
+        None,
+    )
+    assert btn_elem is not None, "Button b1 not found"
+
+    # Find label node with 'Click Me'
+    label_elem = next(
+        (
+            e
+            for e in updated_tree["interactive_elements"]
+            if "Click Me" in e.get("name", "") and e.get("role") == "label"
+        ),
+        None,
+    )
+    if label_elem:
+        bubble_res = interact_with_node(node_id=label_elem["id"], action="click", pid=pid)
+        assert "via parent" in bubble_res or "Activated" in bubble_res

@@ -100,7 +100,7 @@ def drag(start_x: int, start_y: int, end_x: int, end_y: int, pid: int | None = N
 
 
 def scroll(dx: int, dy: int, pid: int | None = None) -> Any:
-    """Dispatches discrete mouse wheel scroll deltas (positive dy=up, negative dy=down)."""
+    """Dispatches discrete mouse wheel scroll deltas (positive dy=down, negative dy=up)."""
     effective_pid = _sync_target_pid(pid)
 
     def _do() -> str:

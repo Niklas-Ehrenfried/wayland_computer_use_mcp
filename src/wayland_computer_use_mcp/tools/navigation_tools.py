@@ -108,6 +108,7 @@ def interact_with_node(
     target: str | None = None,
     action: str = "click",
     text: str | None = None,
+    value: float | None = None,
     node_id: str | None = None,
     pid: int | None = None,
     start_offset: int = 0,
@@ -118,8 +119,8 @@ def interact_with_node(
 
     Executes Level 1 AT-SPI actions (with Level 2 coordinate fallback), visibly moves cursor,
     and returns the post-action UI tree delta (modified/appeared widgets).
-    Supports actions: click, type, clear, select_all, select_range, copy, paste, cut, drag_select,
-    double_click, right_click, hover.
+    Supports actions: click, type, set_value, clear, select_all, select_range, copy,
+    paste, cut, drag_select, double_click, right_click, hover.
     """
     resolved_target = target or node_id
     if not resolved_target:
@@ -164,6 +165,7 @@ def interact_with_node(
             resolved_node_id,
             action=act,
             text=text,
+            value=value,
             start_offset=start_offset,
             end_offset=end_offset,
         )

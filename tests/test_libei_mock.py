@@ -89,10 +89,10 @@ def test_eiclient_mocked_cdll(monkeypatch):
 
     # Test scroll
     client.scroll(2.0, 3.0)
-    scroll_args = mock_c.ei_device_scroll_delta.call_args[0]
+    scroll_args = mock_c.ei_device_scroll_discrete.call_args[0]
     assert scroll_args[0] == mock_dev
-    assert scroll_args[1].value == 2.0
-    assert scroll_args[2].value == 3.0
+    assert scroll_args[1].value == 120
+    assert scroll_args[2].value == 120
 
     # Test type_char with device present
     assert client.type_char("a") is True

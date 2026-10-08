@@ -63,6 +63,10 @@ class InputDispatcher:
         ei = self._get_ei_client()
         return bool(ei and ei.keyboard_device)
 
+    def _has_ei_scroll(self) -> bool:
+        ei = self._get_ei_client()
+        return bool(ei and ei.scroll_device)
+
     def dispatch_click(self, x: int, y: int, button: str = "left") -> str:
         """Validates bounds and executes mouse click."""
         self._verify_preconditions()
@@ -209,12 +213,14 @@ class InputDispatcher:
         if self._is_mock():
             return f"Scrolled dx={dx}, dy={dy}"
 
-        self.rd_client.notify_pointer_axis(float(dx), float(dy))
-        if self._has_ei_pointer():
+        if self._has_ei_scroll():
             try:
                 self._get_ei_client().scroll(float(dx), float(dy))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("EI scroll failed, falling back to RemoteDesktop: %s", exc)
+                self.rd_client.notify_pointer_axis(float(dx), float(dy))
+        else:
+            self.rd_client.notify_pointer_axis(float(dx), float(dy))
 
         self._apply_action_delay()
         return f"Scrolled dx={dx}, dy={dy}"

@@ -316,4 +316,3 @@ def get_window_geometry(pid: int) -> dict[str, Any]:
 def register_visual_tools(mcp: FastMCP) -> None:
     """Registers visual grounding and screenshot tools onto FastMCP."""
     mcp.tool()(capture_window_frame)
-

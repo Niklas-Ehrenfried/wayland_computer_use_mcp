@@ -298,12 +298,13 @@ class AtspiInspector:
                 children_reply = await self.bus.call(child_msg)
                 if children_reply and children_reply.body:
                     child_refs = children_reply.body[0]
-                    for c_ref in child_refs:
+                    for idx, c_ref in enumerate(child_refs):
                         c_bus, c_path = c_ref[0], c_ref[1]
                         child_node = await self._traverse_node(
                             c_bus, c_path, current_depth + 1, max_depth
                         )
                         if child_node:
+                            child_node["index_in_parent"] = idx
                             node["children"].append(child_node)
 
         except Exception as exc:

@@ -54,9 +54,12 @@ def flatten_tree(tree: dict[str, Any], pid: int = 0) -> list[dict[str, Any]]:
     if pid is not None and pid >= 0:
         _node_cache[pid].clear()
 
-    def _traverse(node: dict[str, Any]) -> None:
-        if not node:
+    def _traverse(node: dict[str, Any], ancestors: list[dict[str, Any]] | None = None) -> None:
+        if not node or not isinstance(node, dict):
             return
+
+        if ancestors is None:
+            ancestors = []
 
         role = str(node.get("role", "")).lower()
         name = str(node.get("name", "")).strip()
@@ -66,6 +69,8 @@ def flatten_tree(tree: dict[str, Any], pid: int = 0) -> list[dict[str, Any]]:
         is_interactive = role in INTERACTIVE_ROLES
         is_label = role in ("label", "static") and bool(name)
 
+        next_ancestors = ancestors + [node]
+
         if is_interactive or is_label:
             bounds = node.get("bounds", [0, 0, 0, 0])
             # Ignore unmapped or offscreen elements with negative or zero extents
@@ -73,7 +78,7 @@ def flatten_tree(tree: dict[str, Any], pid: int = 0) -> list[dict[str, Any]]:
                 bounds[0] < 0 or bounds[1] < 0 or bounds[2] <= 0 or bounds[3] <= 0
             ):
                 for child in node.get("children", []):
-                    _traverse(child)
+                    _traverse(child, next_ancestors)
                 return
 
             prefix = ROLE_PREFIX_MAP.get(role, "w")
@@ -118,10 +123,20 @@ def flatten_tree(tree: dict[str, Any], pid: int = 0) -> list[dict[str, Any]]:
                     "id": node_id,
                     "center": center,
                     "bounds": bounds,
+                    "ancestors": [
+                        {
+                            "bus_name": a.get("bus_name"),
+                            "path": a.get("path"),
+                            "role": str(a.get("role", "")).lower(),
+                            "name": str(a.get("name", "")).strip(),
+                            "index_in_parent": a.get("index_in_parent", 0),
+                        }
+                        for a in reversed(ancestors)
+                    ],
                 }
 
         for child in node.get("children", []):
-            _traverse(child)
+            _traverse(child, next_ancestors)
 
     _traverse(tree)
     return elements

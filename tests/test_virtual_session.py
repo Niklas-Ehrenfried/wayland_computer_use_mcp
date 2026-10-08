@@ -2,7 +2,8 @@
 
 Verifies that:
 1. Applications can run inside an isolated virtual Wayland socket (e.g. kwin_wayland --virtual).
-2. Screenshots of the running application inside the virtual session are captured without human intervention.
+2. Screenshots of the running application inside the virtual session are captured
+   without human intervention.
 3. AT-SPI semantic inspection and visual frame captures operate completely in the background.
 """
 
@@ -11,7 +12,6 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import time
 from pathlib import Path
 
 import pytest
@@ -38,7 +38,8 @@ def test_unsupervised_virtual_session_execution():
 
     # Shell script running inside an isolated D-Bus session
     runner_script = f"""
-    kwin_wayland --virtual --socket {socket_name} --no-lockscreen --no-global-shortcuts --width 1280 --height 800 &
+    kwin_wayland --virtual --socket {socket_name} --no-lockscreen \\
+        --no-global-shortcuts --width 1280 --height 800 &
     KW_PID=$!
     sleep 2
 
@@ -54,13 +55,23 @@ def test_unsupervised_virtual_session_execution():
     exit 0
     """
 
-    proc = subprocess.run(
-        ["dbus-run-session", "--", "bash", "-c", runner_script],
-        cwd=str(repo_root),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=15,
-    )
+    import tempfile
+
+    isolated_xdg_dir = tempfile.mkdtemp(prefix="wayland_mcp_isolated_xdg_")
+    env = os.environ.copy()
+    env["XDG_RUNTIME_DIR"] = isolated_xdg_dir
+
+    try:
+        proc = subprocess.run(
+            ["dbus-run-session", "--", "bash", "-c", runner_script],
+            cwd=str(repo_root),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+    finally:
+        shutil.rmtree(isolated_xdg_dir, ignore_errors=True)
 
     assert proc.returncode == 0, f"Virtual session failed with code {proc.returncode}"
     assert out_capture.exists(), "Virtual session screenshot was not generated"
@@ -71,4 +82,6 @@ def test_unsupervised_virtual_session_execution():
         assert img.height == 800
         # Verify that actual content rendered (more than a flat blank canvas)
         colors = img.getcolors(maxcolors=20000)
-        assert colors is not None and len(colors) > 100, "Image contains no rendered application content"
+        assert colors is not None and len(colors) > 100, (
+            "Image contains no rendered application content"
+        )
