@@ -154,8 +154,28 @@ This document defines the roadmap, completed milestones, architectural guideline
   - Implement rolling TTL or file count limits (e.g., max 20 screenshots, age > 24 hours) for `~/.cache/wayland_computer_use_mcp/artifacts/`.
   - Add tool or CLI flag to purge cached artifacts on command.
 
-### F. Source Code Line Mapping (Python GUI Profiler)
+### G. Source Code Line Mapping (Python GUI Profiler)
 - [ ] **D-Bus Node to Python Variable Resolver**:
   - When analyzing local workspaces, inspect Python GUI source files (`.py`) for variable declarations (e.g. `self.btn_submit = Gtk.Button(...)` or `self.username_input = QLineEdit()`).
   - Correlate accessible names and roles to local variable names and attach `source_loc: "main.py:42"` to tree nodes in `inspect_ui_tree`.
+
+### H. Dynamic UI Visibility Diffing & State Change Tracking (`ui_changes`)
+- [ ] **Accurate Element Appearance / Disappearance Diffing**:
+  - **Identified Gap**: When interacting with dynamic filtering widgets (e.g., clicking "Completed" or "Pending" in a `Gtk.ListBox`), `interact_with_node` currently returns empty `ui_changes: {"modified":[],"appeared":[],"hidden":[]}` even though elements visually disappear.
+  - **Root Causes**:
+    - Filtered or removed items may either remain in the AT-SPI hierarchy with toggled state flags (`showing`/`visible` flag cleared) instead of being removed from the tree.
+    - Child items in deeply nested container rows may exceed the snapshot depth comparison limit.
+  - **Action Items**:
+    - Update `delta.py` and `tree.py` to evaluate state transitions on accessible nodes (specifically checking `showing` / `visible` / `defunct` states).
+    - Ensure filtered-out widgets that lose their `showing` state are properly categorized into `hidden: [...]` with their labels and IDs.
+    - Ensure newly displayed elements are detected and surfaced in `appeared: [...]`.
+
+### I. Agent Instructions & Workflow Synthesis (Exploratory Walkthrough ➔ Presets)
+- [ ] **Adaptive Agent Workflow Guidance (`wayland_automation_guide`)**:
+  - **Two-Phase Automation Pattern**:
+    1. **Phase 1: Exploratory Walkthrough**: The AI coding agent performs an initial manual walkthrough (inspecting UI tree, validating coordinates, tapping buttons, capturing verification frames).
+    2. **Phase 2: Workflow Synthesis**: Armed with deep knowledge of the application code and previous exploratory results, the agent synthesizes reusable preset workflows (`.agents/artifacts/presets/*.json`) via `preset_workflow`.
+    3. **Phase 3: Fast & Token-Efficient Replays**: Subsequent test runs, CI validations, and repetitive UI verification tasks execute the compiled preset in a single atomic MCP tool call, eliminating repetitive roundtrips and drastically reducing LLM token consumption.
+  - Update server-side system prompts and documentation in `instructions/` and `prompts/` to explicitly prescribe this workflow to client agents.
+
 
