@@ -32,6 +32,104 @@ KEY_BACKSPACE = 14
 KEY_TAB = 15
 KEY_SPACE = 57
 KEY_ESC = 1
+KEY_RIGHTALT = 100
+
+_XKB_KEYMAP_FORMAT_TEXT_V1 = 1
+_EI_KEYMAP_TYPE_XKB = 1
+
+
+def build_charmap_from_xkb(keymap_text: str) -> dict[str, tuple[int, bool, bool]]:
+    """Parses an XKB keymap string via libxkbcommon into char -> (evdev_keycode, shift, altgr)."""
+    if not keymap_text:
+        return {}
+    try:
+        xkb = ctypes.CDLL("libxkbcommon.so.0")
+    except OSError:
+        return {}
+
+    xkb.xkb_context_new.argtypes = [ctypes.c_int]
+    xkb.xkb_context_new.restype = ctypes.c_void_p
+    xkb.xkb_context_unref.argtypes = [ctypes.c_void_p]
+    xkb.xkb_context_unref.restype = None
+    xkb.xkb_keymap_new_from_string.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_int,
+    ]
+    xkb.xkb_keymap_new_from_string.restype = ctypes.c_void_p
+    xkb.xkb_keymap_unref.argtypes = [ctypes.c_void_p]
+    xkb.xkb_keymap_unref.restype = None
+    xkb.xkb_keymap_min_keycode.argtypes = [ctypes.c_void_p]
+    xkb.xkb_keymap_min_keycode.restype = ctypes.c_uint32
+    xkb.xkb_keymap_max_keycode.argtypes = [ctypes.c_void_p]
+    xkb.xkb_keymap_max_keycode.restype = ctypes.c_uint32
+    xkb.xkb_keymap_num_levels_for_key.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+    ]
+    xkb.xkb_keymap_num_levels_for_key.restype = ctypes.c_uint32
+    xkb.xkb_keymap_key_get_syms_by_level.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.POINTER(ctypes.c_uint32)),
+    ]
+    xkb.xkb_keymap_key_get_syms_by_level.restype = ctypes.c_int
+    xkb.xkb_keysym_to_utf32.argtypes = [ctypes.c_uint32]
+    xkb.xkb_keysym_to_utf32.restype = ctypes.c_uint32
+
+    ctx = xkb.xkb_context_new(0)
+    if not ctx:
+        return {}
+    km = 0
+    try:
+        km = xkb.xkb_keymap_new_from_string(
+            ctx,
+            keymap_text.encode("utf-8", errors="ignore"),
+            _XKB_KEYMAP_FORMAT_TEXT_V1,
+            0,
+        )
+        if not km:
+            return {}
+
+        charmap: dict[str, tuple[int, bool, bool]] = {
+            "\n": (KEY_ENTER, False, False),
+            "\r": (KEY_ENTER, False, False),
+            "\t": (KEY_TAB, False, False),
+        }
+        min_kc = int(xkb.xkb_keymap_min_keycode(km))
+        max_kc = int(xkb.xkb_keymap_max_keycode(km))
+        syms_ptr = ctypes.POINTER(ctypes.c_uint32)()
+
+        for kc in range(min_kc, max_kc + 1):
+            evdev_code = kc - 8
+            if evdev_code <= 0:
+                continue
+            levels = min(4, int(xkb.xkb_keymap_num_levels_for_key(km, kc, 0)))
+            for level in range(levels):
+                count = int(
+                    xkb.xkb_keymap_key_get_syms_by_level(km, kc, 0, level, ctypes.byref(syms_ptr))
+                )
+                if count != 1 or not syms_ptr:
+                    continue
+                cp = int(xkb.xkb_keysym_to_utf32(syms_ptr[0]))
+                if cp < 32:
+                    continue
+                ch = chr(cp)
+                if ch not in charmap:
+                    charmap[ch] = (evdev_code, bool(level & 1), bool(level & 2))
+        return charmap
+    except Exception as exc:
+        logger.debug("Failed to parse XKB keymap: %s", exc)
+        return {}
+    finally:
+        if km:
+            xkb.xkb_keymap_unref(km)
+        xkb.xkb_context_unref(ctx)
+
 
 # Character to Linux evdev keycode mapping (US QWERTY base)
 CHAR_TO_KEYCODE: dict[str, tuple[int, bool]] = {
@@ -243,6 +341,19 @@ class LibEIWrapper:
         if hasattr(c, "ei_seat_bind_capabilities"):
             c.ei_seat_bind_capabilities.restype = None
 
+        if hasattr(c, "ei_device_keyboard_get_keymap"):
+            c.ei_device_keyboard_get_keymap.argtypes = [ctypes.c_void_p]
+            c.ei_device_keyboard_get_keymap.restype = ctypes.c_void_p
+        if hasattr(c, "ei_keymap_get_type"):
+            c.ei_keymap_get_type.argtypes = [ctypes.c_void_p]
+            c.ei_keymap_get_type.restype = ctypes.c_int
+        if hasattr(c, "ei_keymap_get_fd"):
+            c.ei_keymap_get_fd.argtypes = [ctypes.c_void_p]
+            c.ei_keymap_get_fd.restype = ctypes.c_int
+        if hasattr(c, "ei_keymap_get_size"):
+            c.ei_keymap_get_size.argtypes = [ctypes.c_void_p]
+            c.ei_keymap_get_size.restype = ctypes.c_size_t
+
 
 libei = LibEIWrapper()
 
@@ -283,6 +394,7 @@ class EIClient:
         self._emulation_seq: int = 0
         self._abs_regions: list[tuple[int, int, int, int]] = []
         self._in_drag = False
+        self._xkb_charmap: dict[str, tuple[int, bool, bool]] = {}
 
         if fd is not None and libei.available:
             self._init_session(fd)
@@ -412,6 +524,7 @@ class EIClient:
                                 logger.info("libei: acquired button device")
                             if has_cap(device, self.EI_DEVICE_CAP_KEYBOARD):
                                 self.keyboard_device = device
+                                self._load_keyboard_keymap(device)
                                 logger.info("libei: acquired keyboard device")
                             if has_cap(device, self.EI_DEVICE_CAP_SCROLL):
                                 self.scroll_device = device
@@ -616,28 +729,90 @@ class EIClient:
             if not is_down:
                 self._stop_emulating(dev)
 
+    def _load_keyboard_keymap(self, device: Any) -> None:
+        """Extracts live XKB keymap from EIS keyboard device if exposed by compositor."""
+        c = libei._cdll
+        if not c or not hasattr(c, "ei_device_keyboard_get_keymap"):
+            return
+        try:
+            km = c.ei_device_keyboard_get_keymap(device)
+            if not isinstance(km, int) or km <= 0:
+                return
+            if hasattr(c, "ei_keymap_get_type"):
+                km_type = c.ei_keymap_get_type(km)
+                if isinstance(km_type, int) and km_type != _EI_KEYMAP_TYPE_XKB:
+                    return
+            fd = c.ei_keymap_get_fd(km)
+            sz = c.ei_keymap_get_size(km)
+            if (
+                not isinstance(fd, int)
+                or fd < 0
+                or not isinstance(sz, int)
+                or not (0 < sz < 4_000_000)
+            ):
+                return
+            raw = os.pread(fd, sz, 0)
+            charmap = build_charmap_from_xkb(raw.decode("utf-8", errors="ignore"))
+            if charmap:
+                self._xkb_charmap = charmap
+                logger.info("libei: loaded live EIS XKB keymap (%d characters)", len(charmap))
+        except Exception as exc:
+            logger.debug("Could not load EIS XKB keymap: %s", exc)
+
+    def _lookup_char_mapping(self, char: str) -> tuple[int, bool, bool] | None:
+        if self._xkb_charmap:
+            return self._xkb_charmap.get(char)
+        legacy = CHAR_TO_KEYCODE.get(char)
+        if legacy is None:
+            return None
+        return (legacy[0], legacy[1], False)
+
+    def can_type_text(self, text: str) -> bool:
+        """Returns True if every character in text is directly mapped for keystroke typing."""
+        if not self.keyboard_device:
+            return False
+        return all(self._lookup_char_mapping(ch) is not None for ch in text)
+
+    def resolve_key_name(self, key_name: str) -> int | None:
+        """Resolves a single-character key name against the live XKB keymap when loaded."""
+        if len(key_name) == 1 and self._xkb_charmap:
+            entry = self._xkb_charmap.get(key_name.lower())
+            if entry is not None:
+                return entry[0]
+        return None
+
     def type_char(self, char: str) -> bool:
-        """Types a single character using evdev keycodes and shift modifier.
+        """Types a single character using live EIS XKB keymap (or US QWERTY fallback).
 
         Returns True if character was mapped and dispatched, False if fallback needed.
         """
-        if char not in CHAR_TO_KEYCODE:
+        mapping = self._lookup_char_mapping(char)
+        if mapping is None:
             return False
 
         if not self.keyboard_device:
             self.poll_events()
             if not self.keyboard_device:
                 return False
+            mapping = self._lookup_char_mapping(char)
+            if mapping is None:
+                return False
 
-        keycode, needs_shift = CHAR_TO_KEYCODE[char]
+        keycode, needs_shift, needs_altgr = mapping
         if needs_shift:
             self.key_press(KEY_LEFTSHIFT, True)
+            time.sleep(0.002)
+        if needs_altgr:
+            self.key_press(KEY_RIGHTALT, True)
             time.sleep(0.002)
 
         self.key_press(keycode, True)
         time.sleep(0.002)
         self.key_press(keycode, False)
 
+        if needs_altgr:
+            time.sleep(0.002)
+            self.key_press(KEY_RIGHTALT, False)
         if needs_shift:
             time.sleep(0.002)
             self.key_press(KEY_LEFTSHIFT, False)

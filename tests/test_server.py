@@ -134,3 +134,54 @@ def test_active_app_protection(monkeypatch):
 
     with pytest.raises(RuntimeError, match="No active managed application"):
         inspect_ui_tree()
+
+
+async def test_tool_output_schemas_match_return_types():
+    """Verify FastMCP output schemas match actual return types (no wrapped-string regression)."""
+    tools = {t.name: t for t in await mcp.list_tools()}
+
+    dict_tools = {
+        "launch_app",
+        "restart_app",
+        "terminate_app",
+        "list_managed_apps",
+        "inspect_ui_tree",
+        "batch_actions",
+        "watch_ui_events",
+        "window_control",
+        "preset_workflow",
+    }
+    for name in dict_tools:
+        schema = tools[name].output_schema
+        assert schema is not None, f"Expected object output schema for {name}"
+        assert schema.get("type") == "object", (
+            f"Expected object output schema for {name}, got {schema}"
+        )
+        assert not schema.get("x-fastmcp-wrap-result"), (
+            f"Tool {name} unexpectedly wrapped as scalar string: {schema}"
+        )
+
+    interaction_tools = {
+        "interact_with_node",
+        "click",
+        "double_click",
+        "right_click",
+        "hover",
+        "drag",
+        "scroll",
+        "type_text",
+        "key_combination",
+    }
+    for name in interaction_tools:
+        schema = tools[name].output_schema
+        assert schema is None or not schema.get("x-fastmcp-wrap-result"), (
+            f"Tool {name} must not have wrapped-string output schema: {schema}"
+        )
+
+    string_tools = {"get_app_logs", "clipboard_read", "clipboard_write"}
+    for name in string_tools:
+        schema = tools[name].output_schema
+        assert schema is not None
+        assert schema.get("properties", {}).get("result", {}).get("type") == "string", (
+            f"Expected wrapped string output schema for {name}, got {schema}"
+        )

@@ -80,6 +80,9 @@ class Config:
         env_mode = os.environ.get("WAYLAND_MCP_DISPLAY_MODE", "").strip().lower()
         if env_mode in ("live", "virtual"):
             config.display_mode = env_mode  # type: ignore
+        elif env_mode in ("virtual-window", "virtual_window", "isolated", "headed"):
+            config.display_mode = "virtual"
+            config.virtual_headed = True
 
         # Access mode override (window vs fullscreen/monitor vs both)
         env_access = os.environ.get("WAYLAND_MCP_ACCESS_MODE", "").strip().lower()
@@ -156,6 +159,9 @@ class Config:
                 mode = arg.split("=", 1)[1].strip().lower()
                 if mode in ("live", "virtual"):
                     self.display_mode = mode  # type: ignore
+                elif mode in ("virtual-window", "virtual_window", "isolated", "headed"):
+                    self.display_mode = "virtual"
+                    self.virtual_headed = True
             elif arg == "--virtual":
                 self.display_mode = "virtual"
             elif arg in ("--virtual-window", "--isolated-window"):
@@ -232,35 +238,40 @@ def detect_virtual_compositor_cmd(
     width: int = 1280,
     height: int = 800,
     explicit_cmd: str = DEFAULT_VIRTUAL_CMD,
+    host_wayland_display: str | None = None,
 ) -> str:
     """Resolves a cross-DE Wayland nested/headless compositor command.
 
-    Prefers compositor-agnostic ``weston`` first so visible Playwright-style
-    isolated windows work across KDE, GNOME, Sway, and Hyprland alike.
+    Prefers ``kwin_wayland`` first when available because it supports isolated
+    direct EIS input injection and D-Bus window geometry inside private
+    sandboxes without host portal dialogs, falling back to ``sway`` / ``weston``.
     """
     if explicit_cmd and explicit_cmd != DEFAULT_VIRTUAL_CMD:
         return explicit_cmd
 
+    wayland_flag = f"--wayland-display {host_wayland_display} " if host_wayland_display else ""
+
     if headed:
-        if shutil.which("weston"):
-            return f"weston --socket={socket_name} --width={width} --height={height}"
         if shutil.which("kwin_wayland"):
             return (
-                f"kwin_wayland --xwayland --width {width} --height {height} --socket {socket_name}"
+                f"kwin_wayland {wayland_flag}--xwayland --no-lockscreen --no-global-shortcuts "
+                f"--width {width} --height {height} --socket {socket_name}"
             )
         if shutil.which("sway"):
             return "sway"
+        if shutil.which("weston"):
+            return f"weston --socket={socket_name} --width={width} --height={height}"
         return f"weston --socket={socket_name} --width={width} --height={height}"
 
-    if shutil.which("weston"):
-        return (
-            f"weston --backend=headless-backend.so --socket={socket_name} "
-            f"--width={width} --height={height}"
-        )
     if shutil.which("kwin_wayland"):
         return (
             f"kwin_wayland --virtual --socket {socket_name} "
             f"--no-lockscreen --no-global-shortcuts --width {width} --height {height}"
+        )
+    if shutil.which("weston"):
+        return (
+            f"weston --backend=headless-backend.so --socket={socket_name} "
+            f"--width={width} --height={height}"
         )
     return explicit_cmd
 

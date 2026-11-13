@@ -34,8 +34,14 @@ class KWinBackend(CompositorBackend):
     async def is_available(self) -> bool:
         if not os.environ.get("WAYLAND_DISPLAY"):
             return False
+        from wayland_computer_use_mcp.config import get_config
+
         desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
-        if "kde" not in desktop and "plasma" not in desktop:
+        if (
+            "kde" not in desktop
+            and "plasma" not in desktop
+            and get_config().display_mode != "virtual"
+        ):
             return False
         try:
             bus = await MessageBus(bus_type=BusType.SESSION).connect()

@@ -205,3 +205,35 @@ def test_eiclient_start_emulating_increments_sequence(monkeypatch):
     seqs = [call.args[1].value for call in mock_c.ei_device_start_emulating.call_args_list]
     assert seqs == [1, 2]
     client.close()
+
+
+def test_eiclient_xkb_charmap_and_non_us_layout(monkeypatch):
+    """Live XKB charmap overrides US QWERTY defaults for QWERTZ/AZERTY/AltGr chars."""
+    from wayland_computer_use_mcp.libei import KEY_RIGHTALT, build_charmap_from_xkb
+
+    client = EIClient(fd=None)
+    client.keyboard_device = 0x3000
+    # Simulate German QWERTZ swap (y <-> z) and AltGr character '@'
+    client._xkb_charmap = {
+        "y": (44, False, False),
+        "z": (21, False, False),
+        "@": (16, False, True),
+    }
+
+    assert client.resolve_key_name("y") == 44
+    assert client.resolve_key_name("z") == 21
+    assert client.can_type_text("yz@") is True
+    assert client.can_type_text("yz€") is False
+
+    pressed: list[tuple[int, bool]] = []
+    monkeypatch.setattr(client, "key_press", lambda code, down: pressed.append((code, down)))
+    assert client.type_char("@") is True
+    assert pressed == [
+        (KEY_RIGHTALT, True),
+        (16, True),
+        (16, False),
+        (KEY_RIGHTALT, False),
+    ]
+
+    # build_charmap_from_xkb gracefully handles empty input
+    assert build_charmap_from_xkb("") == {}

@@ -1,11 +1,12 @@
-"""System clipboard abstraction supporting Portal, Wayland CLI, KDE Klipper, and X11.
+"""System clipboard abstraction supporting Portal, Wayland data-control, CLI, KDE Klipper, and X11.
 
 Provides automatic backend discovery and fallback:
 1. org.freedesktop.portal.Clipboard (XDG Portal >= 1.18 via D-Bus, zero CLI binaries)
-2. wl-copy / wl-paste (Wayland native CLI)
-3. qdbus6 org.kde.klipper (KDE Plasma 6)
-4. qdbus org.kde.klipper (KDE Plasma 5)
-5. xclip (Xwayland / X11)
+2. Native Wayland wire protocol (ext_data_control_manager_v1 / zwlr_data_control_manager_v1)
+3. wl-copy / wl-paste (Wayland native CLI)
+4. qdbus6 org.kde.klipper (KDE Plasma 6)
+5. qdbus org.kde.klipper (KDE Plasma 5)
+6. xclip (Xwayland / X11)
 """
 
 from __future__ import annotations
@@ -15,6 +16,32 @@ import shutil
 import subprocess
 
 logger = logging.getLogger(__name__)
+
+
+def _wayland_write_clipboard(text: str) -> bool:
+    try:
+        from wayland_computer_use_mcp.config import get_config
+        from wayland_computer_use_mcp.wayland_clipboard import write_wayland_clipboard
+
+        if get_config().mock_mode:
+            return False
+        return write_wayland_clipboard(text)
+    except Exception as exc:
+        logger.debug("Wayland data-control clipboard write failed: %s", exc)
+    return False
+
+
+def _wayland_read_clipboard() -> str | None:
+    try:
+        from wayland_computer_use_mcp.config import get_config
+        from wayland_computer_use_mcp.wayland_clipboard import read_wayland_clipboard
+
+        if get_config().mock_mode:
+            return None
+        return read_wayland_clipboard()
+    except Exception as exc:
+        logger.debug("Wayland data-control clipboard read failed: %s", exc)
+    return None
 
 
 def _portal_write_clipboard(text: str) -> bool:
@@ -44,6 +71,9 @@ def _portal_read_clipboard() -> str | None:
 def write_system_clipboard(text: str) -> bool:
     """Writes text into system clipboard using available backends."""
     if _portal_write_clipboard(text):
+        return True
+
+    if _wayland_write_clipboard(text):
         return True
 
     if shutil.which("wl-copy"):
@@ -109,6 +139,10 @@ def read_system_clipboard() -> str:
     portal_val = _portal_read_clipboard()
     if portal_val is not None:
         return portal_val
+
+    wayland_val = _wayland_read_clipboard()
+    if wayland_val is not None:
+        return wayland_val
 
     if shutil.which("wl-paste"):
         try:

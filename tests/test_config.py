@@ -107,3 +107,16 @@ def test_set_and_get_config():
     custom = Config(mock_mode=True, action_delay_seconds=0.5)
     set_config(custom)
     assert get_config() is custom
+
+
+def test_virtual_window_display_mode_aliases(monkeypatch):
+    """WAYLAND_MCP_DISPLAY_MODE and --display-mode accept virtual-window/isolated."""
+    monkeypatch.setenv("WAYLAND_MCP_DISPLAY_MODE", "virtual-window")
+    cfg = Config.load()
+    assert cfg.display_mode == "virtual"
+    assert cfg.virtual_headed is True
+
+    cfg2 = Config()
+    cfg2.apply_cli_args(["--display-mode=isolated"])
+    assert cfg2.display_mode == "virtual"
+    assert cfg2.virtual_headed is True

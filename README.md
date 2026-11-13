@@ -46,9 +46,10 @@ The server operates in two distinct display modes and supports fine-grained acce
   - Interfaces with the active session D-Bus and AT-SPI2 bus.
   - Caches and reuses XDG Desktop Portal `restore_token` credentials to prevent repeated permission prompts.
   - Executes Level 1 AT-SPI actions without moving the host cursor; physical pointer motion only triggers on explicit pointer tools or Level 2 fallback.
-- **Virtual / Isolated Mode (`--virtual`, `--virtual-window`, or `WAYLAND_MCP_DISPLAY_MODE="virtual"`)**:
-  - `--virtual`: Launches a headless virtual Wayland compositor (`weston --backend=headless-backend.so` or `kwin_wayland --virtual`) for unattended/CI testing.
-  - `--virtual-window` / `WAYLAND_MCP_VIRTUAL_HEADED=1`: Opens a **Playwright-style visible nested compositor window** (`weston`, `kwin_wayland`, or `sway`) on top of KDE, GNOME, Sway, or Hyprland so you can watch the agent drive an app in its own isolated surface.
+- **Virtual / Isolated Mode (`--virtual`, `--virtual-window`, `WAYLAND_MCP_DISPLAY_MODE="virtual"`, or `WAYLAND_MCP_DISPLAY_MODE="virtual-window"`)**:
+  - Starts a private `XDG_RUNTIME_DIR`, isolated `dbus-daemon`, isolated AT-SPI2 bus, and a dedicated nested/headless compositor (`kwin_wayland`, `sway`, or `weston`), keeping your host pointer, focus, and clipboard untouched without triggering host portal prompts.
+  - `--virtual`: Headless virtual Wayland compositor for unattended/CI runs.
+  - `--virtual-window` / `WAYLAND_MCP_DISPLAY_MODE="virtual-window"` / `WAYLAND_MCP_VIRTUAL_HEADED=1`: Opens a **Playwright-style visible nested compositor window** so you can watch the agent drive an app in its own isolated window.
 
 ### 2. Access Scopes
 - **Window Isolation (`--window-only` or `WAYLAND_MCP_ACCESS_MODE="window"`)** *(Default)*:
@@ -91,14 +92,16 @@ To guarantee safe operation despite upstream protocol constraints, this server i
 uvx wayland-computer-use-mcp
 ```
 
-The core package requires only pure/wheel dependencies (`fastmcp`, `dbus-fast`, `pillow`). Clipboard transfers use `org.freedesktop.portal.Clipboard` first (with `wl-clipboard`/`qdbus`/`xclip` fallbacks), and screenshots use native compositor capture, `gst-launch-1.0` CLI, or `org.freedesktop.portal.Screenshot`.
+The core package requires only pure/wheel dependencies (`fastmcp`, `dbus-fast`, `pillow`). Clipboard transfers use `org.freedesktop.portal.Clipboard` or native Wayland `ext_data_control_manager_v1` / `zwlr_data_control_manager_v1` (with `wl-clipboard`/`qdbus`/`xclip` fallbacks), keyboard typing adapts to the compositor's live EIS XKB keymap, and screenshots use native compositor capture, `gst-launch-1.0` CLI, or `org.freedesktop.portal.Screenshot`.
 
 - **Optional GStreamer Python bindings** (only needed for in-process PipeWire `appsink` streaming instead of CLI/native capture):
   ```bash
   uv pip install "wayland-computer-use-mcp[gstreamer]"
   ```
-- **Visible isolated Playwright-style window across KDE / GNOME / Sway / Hyprland**:
+- **Visible isolated Playwright-style window**:
+  Uses `kwin_wayland` (built into KDE Plasma), `sway`, or `weston`:
   ```bash
+  # No extra compositor install needed on KDE Plasma (`kwin_wayland`); on GNOME/other desktops install weston or sway:
   sudo apt install -y weston    # or Fedora: sudo dnf install weston / Arch: pacman -S weston
   uvx wayland-computer-use-mcp --virtual-window
   ```
@@ -215,8 +218,8 @@ uv sync
 - **`get_app_logs(pid, lines)`**: Retrieves console output and crash tracebacks from a thread-safe circular buffer.
 
 ### 5. OS & Desktop Integration (3 Default Tools + 2 Opt-In Tools)
-- **`clipboard_read()`**: Reads text from clipboard (`org.freedesktop.portal.Clipboard` first, falling back to `wl-paste`, `qdbus`, `xclip`).
-- **`clipboard_write(text)`**: Writes text to clipboard (`org.freedesktop.portal.Clipboard` first, falling back to `wl-copy`, `qdbus`, `xclip`).
+- **`clipboard_read()`**: Reads text from clipboard (`org.freedesktop.portal.Clipboard` and native Wayland `ext_data_control_manager_v1`/`zwlr_data_control_manager_v1` first, falling back to `wl-paste`, `qdbus`, `xclip`).
+- **`clipboard_write(text)`**: Writes text to clipboard (`org.freedesktop.portal.Clipboard` and native Wayland data-control first, falling back to `wl-copy`, `qdbus`, `xclip`).
 - **`window_control(action, pid)`**: Controls window state (`minimize`, `maximize`, `restore`, `close`).
 
 Opt-in desktop shortcut tools (enable with `--enable-desktop-installer` or `WAYLAND_MCP_ENABLE_DESKTOP_INSTALLER=1`):
@@ -244,6 +247,18 @@ Run the automated live end-to-end integration test suite:
 ```bash
 uv run pytest tests/test_live_example_app.py -v
 ```
+
+---
+
+## Tested Environments & Compositor Support
+
+| Compositor / Desktop | Status | Verified Capabilities |
+| :--- | :--- | :--- |
+| **KDE Plasma 6** (`kwin_wayland`) | ✅ Live-tested | All 22 MCP tools verified live in both `live` mode (XDG Portal RemoteDesktop + ScreenCast, `libei` + live XKB keymaps, AT-SPI2, clipboard, KWin window control) and isolated `--virtual-window` mode (private `XDG_RUNTIME_DIR` + D-Bus + nested `kwin_wayland` + direct `kwin_eis` + native Wayland data-control clipboard). |
+| **GNOME Shell** (`Mutter`, Ubuntu 26.04) | ✅ Live-tested | `tests/test_live_example_app.py` (15/15) & `tests/test_interactive_live.py` verified live: XDG Portal RemoteDesktop + ScreenCast (including single-window selection with window-origin mapping), `libei` input + AT-SPI2 keyboard fallbacks (dropdowns, sliders, tabs, text entry). |
+| **wlroots** (`Sway`, `Hyprland`) | 🧪 Unit-tested | Backend implemented (`swaymsg` / `hyprctl`) and covered by unit tests; full live compositor runs not yet verified. |
+
+> **GNOME Note:** On GNOME Shell, enable **"Remember This Selection"** in the Remote Desktop portal dialog if you want persistent portal restore tokens across runs, and either share the target window directly or select a monitor when prompted.
 
 ---
 

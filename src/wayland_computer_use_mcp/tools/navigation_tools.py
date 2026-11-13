@@ -17,6 +17,7 @@ from wayland_computer_use_mcp.a11y import (
     invoke_node_action,
 )
 from wayland_computer_use_mcp.delta import (
+    InteractionResult,
     compute_ui_delta,
     format_delta_markdown,
     snapshot_interactive_state,
@@ -121,7 +122,7 @@ def interact_with_node(
     start_offset: int = 0,
     end_offset: int = -1,
     settle_timeout_ms: int = 0,
-) -> str:
+) -> InteractionResult:
     """Interacts with an interactive UI widget by 1D node ID (e.g. 'b1', 'e1') or label.
 
     Executes Level 1 AT-SPI actions silently (without moving the cursor), falling back to

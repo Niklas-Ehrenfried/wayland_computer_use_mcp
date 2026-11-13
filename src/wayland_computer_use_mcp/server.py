@@ -168,10 +168,6 @@ def main() -> None:
     sys.argv = [sys.argv[0], *remaining]
     if cfg.enable_desktop_installer:
         register_desktop_installer_tools(mcp)
-    if cfg.display_mode == "virtual" and cfg.virtual_headed and not cfg.mock_mode:
-        from wayland_computer_use_mcp.portal import global_portal_session
-
-        global_portal_session._ensure_virtual_compositor()
     mcp.run()
 
 

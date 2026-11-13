@@ -64,8 +64,9 @@ def launch_app(
     """
     from wayland_computer_use_mcp.config import get_config
 
-    ensure_portal_dialogs_above()
     cfg = get_config()
+    if cfg.display_mode != "virtual" and not cfg.mock_mode:
+        ensure_portal_dialogs_above()
 
     current_pid = global_portal_session.target_pid
     if restart and current_pid and is_responsive(current_pid):

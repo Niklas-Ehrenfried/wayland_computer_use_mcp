@@ -69,6 +69,16 @@ class InputDispatcher:
         """Prevents clicking an unrelated cursor location when only relative EIS exists."""
         ei = self._get_ei_client()
         if (
+            get_config().display_mode == "virtual"
+            and isinstance(ei, EIClient)
+            and ei.ctx is None
+            and not getattr(self.rd_client, "session_handle", None)
+        ):
+            raise RuntimeError(
+                "Isolated virtual compositor has no EIS pointer device; use semantic "
+                "interact_with_node actions or run with kwin_wayland for coordinate input."
+            )
+        if (
             isinstance(ei, EIClient)
             and ei.ctx is not None
             and not ei.has_absolute_pointer
@@ -268,8 +278,9 @@ class InputDispatcher:
 
         ei_client = self._get_ei_client()
 
-        # Use clipboard paste for long/multiline text when a clipboard backend is available
-        if len(text) > 30 or "\n" in text:
+        # Clipboard paste for long/multiline text or unmapped layout/Unicode chars
+        can_type = ei_client.can_type_text(text) if hasattr(ei_client, "can_type_text") else True
+        if len(text) > 30 or "\n" in text or not can_type:
             if self._paste_clipboard_text(text):
                 self._apply_action_delay()
                 return f"{prefix}Pasted {len(text)} characters via clipboard"
@@ -296,6 +307,14 @@ class InputDispatcher:
             return f"Dispatched key combination: {'+'.join(keys)}"
 
         ei_client = self._get_ei_client()
+        resolved_fn = getattr(ei_client, "resolve_key_name", None)
+        if callable(resolved_fn):
+            updated: list[int] = []
+            for k, code in zip(keys, keycodes, strict=True):
+                stripped = k.strip()
+                mapped = resolved_fn(stripped) if len(stripped) == 1 else None
+                updated.append(mapped if isinstance(mapped, int) else code)
+            keycodes = updated
         ei_client.key_combination(keycodes)
         self._apply_action_delay()
         return f"Dispatched key combination: {'+'.join(keys)}"
@@ -327,11 +346,16 @@ class InputDispatcher:
             time.sleep(0.015)
             if self._has_ei_keyboard():
                 ei_client = self._get_ei_client()
+                v_code = (
+                    ei_client.resolve_key_name("v")
+                    if hasattr(ei_client, "resolve_key_name")
+                    else None
+                ) or KEY_V
                 ei_client.key_press(KEY_LEFTCTRL, True)
                 time.sleep(0.005)
-                ei_client.key_press(KEY_V, True)
+                ei_client.key_press(v_code, True)
                 time.sleep(0.005)
-                ei_client.key_press(KEY_V, False)
+                ei_client.key_press(v_code, False)
                 time.sleep(0.005)
                 ei_client.key_press(KEY_LEFTCTRL, False)
             else:

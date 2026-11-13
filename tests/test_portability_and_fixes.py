@@ -405,27 +405,31 @@ def test_virtual_compositor_cmd_cross_de_and_flags(monkeypatch):
         detect_virtual_compositor_cmd,
     )
 
-    # Headed mode prefers cross-DE weston first, falls back to kwin_wayland / sway
+    # Headed/headless mode prefers kwin_wayland (direct isolated EIS + ScreenShot2/spectacle),
+    # then falls back to sway / weston
     monkeypatch.setattr(
         "shutil.which",
         lambda name: f"/usr/bin/{name}" if name in {"weston", "kwin_wayland"} else None,
+    )
+    assert detect_virtual_compositor_cmd(
+        headed=True, socket_name="wl-test", host_wayland_display="wayland-0"
+    ) == (
+        "kwin_wayland --wayland-display wayland-0 --xwayland --no-lockscreen "
+        "--no-global-shortcuts --width 1280 --height 800 --socket wl-test"
+    )
+    assert detect_virtual_compositor_cmd(headed=False, socket_name="wl-test") == (
+        "kwin_wayland --virtual --socket wl-test --no-lockscreen --no-global-shortcuts "
+        "--width 1280 --height 800"
+    )
+
+    monkeypatch.setattr(
+        "shutil.which", lambda name: "/usr/bin/weston" if name == "weston" else None
     )
     assert detect_virtual_compositor_cmd(headed=True, socket_name="wl-test") == (
         "weston --socket=wl-test --width=1280 --height=800"
     )
     assert detect_virtual_compositor_cmd(headed=False, socket_name="wl-test") == (
         "weston --backend=headless-backend.so --socket=wl-test --width=1280 --height=800"
-    )
-
-    monkeypatch.setattr(
-        "shutil.which", lambda name: "/usr/bin/kwin_wayland" if name == "kwin_wayland" else None
-    )
-    assert detect_virtual_compositor_cmd(headed=True, socket_name="wl-test") == (
-        "kwin_wayland --xwayland --width 1280 --height 800 --socket wl-test"
-    )
-    assert detect_virtual_compositor_cmd(headed=False, socket_name="wl-test") == (
-        "kwin_wayland --virtual --socket wl-test --no-lockscreen --no-global-shortcuts "
-        "--width 1280 --height 800"
     )
 
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/sway" if name == "sway" else None)
@@ -709,6 +713,76 @@ def test_screencast_optional_gst_cli_and_portal_screenshot(monkeypatch, tmp_path
         lambda self: _raise_mock_error(),
     )
     assert _capture_portal_screenshot_frame() is None
+
+
+def test_virtual_session_manager_isolates_and_restores_env(monkeypatch, tmp_path):
+    """VirtualSessionManager isolates XDG/D-Bus/WAYLAND env and restores cleanly on stop."""
+    import os
+    from types import SimpleNamespace
+
+    from wayland_computer_use_mcp.config import Config
+    from wayland_computer_use_mcp.portal.virtual import VirtualSessionManager
+
+    host_xdg = tmp_path / "host_xdg"
+    host_xdg.mkdir()
+    (host_xdg / "wayland-0").write_text("")
+
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(host_xdg))
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/tmp/host-bus")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setenv("AT_SPI_BUS_ADDRESS", "unix:path=/tmp/host-atspi")
+
+    spawned: list[list[str]] = []
+
+    class FakeProc:
+        def __init__(self, stdout_line: str = "") -> None:
+            self.pid = 999999
+            self.stdout = SimpleNamespace(readline=lambda: stdout_line)
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    def fake_popen(cmd, env=None, **kwargs):
+        spawned.append(list(cmd))
+        if cmd[0] == "dbus-daemon":
+            assert "AT_SPI_BUS_ADDRESS" not in env
+            return FakeProc("unix:path=/tmp/isolated-dbus-test\n")
+        # Nested compositor creates socket file immediately
+        sock_dir = env["XDG_RUNTIME_DIR"]
+        open(os.path.join(sock_dir, "wayland-mcp-virtual"), "w").close()
+        return FakeProc()
+
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+
+    mgr = VirtualSessionManager()
+    cfg = Config(display_mode="virtual", virtual_headed=True)
+    mgr.ensure_started(cfg)
+
+    try:
+        assert mgr.is_running
+        assert os.environ["XDG_RUNTIME_DIR"] != str(host_xdg)
+        assert os.environ["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/tmp/isolated-dbus-test"
+        assert os.environ["WAYLAND_DISPLAY"] == "wayland-mcp-virtual"
+        assert "AT_SPI_BUS_ADDRESS" not in os.environ
+        assert os.path.islink(os.path.join(mgr.runtime_dir or "", "wayland-0"))
+        assert len(spawned) == 2
+    finally:
+        mgr.stop()
+
+    assert os.environ["XDG_RUNTIME_DIR"] == str(host_xdg)
+    assert os.environ["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/tmp/host-bus"
+    assert os.environ["WAYLAND_DISPLAY"] == "wayland-0"
+    assert os.environ["AT_SPI_BUS_ADDRESS"] == "unix:path=/tmp/host-atspi"
 
 
 async def _raise_mock_error():

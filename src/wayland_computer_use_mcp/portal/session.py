@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shlex
-import signal
 import subprocess
 import threading
 import time
@@ -24,6 +22,7 @@ from wayland_computer_use_mcp.portal.screencast import (
     ScreenCastPipeline,
     crop_element,
 )
+from wayland_computer_use_mcp.portal.virtual import VirtualSessionManager, _terminate_proc_group
 from wayland_computer_use_mcp.security import (
     global_clamper,
     global_geometry_detector,
@@ -59,6 +58,7 @@ class PortalSession:
         self._initialized = False
         self._is_mock = False
         self._last_portal_error: str | None = None
+        self._virtual_env = VirtualSessionManager()
         self._virtual_proc: subprocess.Popen[Any] | None = None
 
     @property
@@ -124,7 +124,9 @@ class PortalSession:
         return self._rd_client.ei_client
 
     def is_active(self) -> bool:
-        return self._initialized and (self.pipewire_node_id is not None or self.is_mock)
+        return self._initialized and (
+            self.pipewire_node_id is not None or self.is_mock or self._virtual_env.is_running
+        )
 
     def check_active_app(self, pid: int | None = None) -> None:
         """Verifies that an application process is actively running and responsive."""
@@ -160,9 +162,22 @@ class PortalSession:
         cfg = get_config()
         self.active_app_id = app_id or "default"
 
-        # Check virtual display mode
-        if cfg.display_mode == "virtual":
+        # Isolated virtual / Playwright-style nested window mode
+        if cfg.display_mode == "virtual" and not cfg.mock_mode:
             self._ensure_virtual_compositor()
+            eis_fd, backend_kind = await self._virtual_env.connect_direct_eis()
+            if eis_fd is not None:
+                self._rd_client.eis_fd = eis_fd
+                self._rd_client.ei_client = EIClient(fd=eis_fd)
+            elif self._rd_client.ei_client is None:
+                self._rd_client.ei_client = EIClient(fd=None)
+            self._initialized = True
+            logger.info(
+                "Initialized isolated virtual session (backend=%s, eis=%s)",
+                backend_kind,
+                eis_fd is not None,
+            )
+            return
 
         # If mock mode or test environment without Wayland display
         if cfg.mock_mode or not os.environ.get("WAYLAND_DISPLAY"):
@@ -179,57 +194,24 @@ class PortalSession:
         except Exception as exc:
             import traceback
 
-            self._last_portal_error = f"{type(exc).__name__}: {exc} | {traceback.format_exc()}"
-            logger.warning("Portal D-Bus negotiation failed: %s", exc)
+            err_detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+            self._last_portal_error = f"{err_detail} | {traceback.format_exc()}"
+            logger.warning("Portal D-Bus negotiation failed: %s", err_detail)
             if cfg.mock_mode or isinstance(exc, FileNotFoundError):
                 logger.info("D-Bus socket unavailable; using mock session.")
                 self._init_mock_session()
             else:
                 self._initialized = False
                 raise RuntimeError(
-                    f"RemoteDesktop / ScreenCast portal negotiation failed: {exc}. "
+                    f"RemoteDesktop / ScreenCast portal negotiation failed: {err_detail}. "
                     "Please ensure the OS permission prompt was allowed."
                 ) from exc
 
     def _ensure_virtual_compositor(self) -> None:
-        """Verify or spawn a cross-DE virtual/nested Wayland compositor when in virtual mode."""
-        from wayland_computer_use_mcp.config import detect_virtual_compositor_cmd
-
-        if self._virtual_proc is not None and self._virtual_proc.poll() is None:
-            return
-
+        """Verify or spawn a cross-DE isolated virtual/nested Wayland compositor."""
         cfg = get_config()
-        current_display = os.environ.get("WAYLAND_DISPLAY")
-        socket_name = cfg.virtual_wayland_display
-        if current_display == socket_name:
-            return
-
-        cmd = detect_virtual_compositor_cmd(
-            headed=cfg.virtual_headed,
-            socket_name=socket_name,
-            explicit_cmd=cfg.virtual_compositor_cmd,
-        )
-        logger.info("Starting virtual compositor (headed=%s): %s", cfg.virtual_headed, cmd)
-        try:
-            argv = shlex.split(cmd)
-            self._virtual_proc = subprocess.Popen(
-                argv,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-            socket_path = os.path.join(runtime_dir, socket_name)
-            deadline = time.time() + 3.0
-            while time.time() < deadline:
-                if os.path.exists(socket_path):
-                    break
-                if self._virtual_proc.poll() is not None:
-                    break
-                time.sleep(0.05)
-            os.environ["WAYLAND_DISPLAY"] = socket_name
-        except Exception as exc:
-            logger.warning("Could not launch virtual compositor: %s", exc)
+        self._virtual_env.ensure_started(cfg)
+        self._virtual_proc = self._virtual_env.compositor_proc
 
     def _init_mock_session(self) -> None:
         """Initialize mock session for CI and testing."""
@@ -439,35 +421,9 @@ class PortalSession:
             global_event_listener.stop()
         except Exception:
             pass
-        proc = self._virtual_proc
-        if proc is not None:
-            pgid: int | None = None
-            raw_pid = getattr(proc, "pid", None)
-            if isinstance(proc, subprocess.Popen) and type(raw_pid) is int and raw_pid > 1:
-                try:
-                    candidate = os.getpgid(raw_pid)
-                    own_pgid = os.getpgid(0)
-                    if candidate > 1 and candidate != own_pgid:
-                        pgid = candidate
-                except OSError:
-                    pgid = None
-            try:
-                if pgid is not None:
-                    os.killpg(pgid, signal.SIGTERM)
-                else:
-                    proc.terminate()
-            except Exception:
-                pass
-            try:
-                proc.wait(timeout=1.5)
-            except Exception:
-                try:
-                    if pgid is not None:
-                        os.killpg(pgid, signal.SIGKILL)
-                    else:
-                        proc.kill()
-                except Exception:
-                    pass
+        self._virtual_env.stop()
+        if self._virtual_proc is not None:
+            _terminate_proc_group(self._virtual_proc)
             self._virtual_proc = None
         self._initialized = False
         self._async_thread.stop()

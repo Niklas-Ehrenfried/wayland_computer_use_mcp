@@ -26,8 +26,8 @@ def run_atspi_sync(coro_fn: Any, *args: Any, **kwargs: Any) -> Any:
     return _atspi_loop.run(coro_fn(*args, **kwargs))
 
 
-def close_atspi_pool() -> None:
-    """Closes all pooled AT-SPI D-Bus connections and stops the background AT-SPI loop."""
+def reset_atspi_cache() -> None:
+    """Clears cached AT-SPI bus address and pooled connections after bus environment switch."""
     global _cached_bus_address
     for bus in list(_bus_pool.values()):
         try:
@@ -36,6 +36,11 @@ def close_atspi_pool() -> None:
             pass
     _bus_pool.clear()
     _cached_bus_address = None
+
+
+def close_atspi_pool() -> None:
+    """Closes all pooled AT-SPI D-Bus connections and stops the background AT-SPI loop."""
+    reset_atspi_cache()
     _atspi_loop.stop()
 
 
@@ -82,7 +87,8 @@ async def resolve_atspi_bus_address(force_refresh: bool = False) -> str | None:
         logger.debug("Failed to query org.a11y.Bus: %s", exc)
 
     uid = os.getuid()
-    fallback_socket = f"/run/user/{uid}/at-spi/bus_0"
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{uid}"
+    fallback_socket = os.path.join(runtime_dir, "at-spi", "bus_0")
     if os.path.exists(fallback_socket):
         _cached_bus_address = f"unix:path={fallback_socket}"
         return _cached_bus_address
