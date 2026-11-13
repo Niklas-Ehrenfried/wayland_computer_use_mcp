@@ -219,6 +219,20 @@ class LibEIWrapper:
             c.ei_device_has_capability.argtypes = [ctypes.c_void_p, ctypes.c_int]
             c.ei_device_has_capability.restype = ctypes.c_bool
 
+        if hasattr(c, "ei_device_get_region"):
+            c.ei_device_get_region.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            c.ei_device_get_region.restype = ctypes.c_void_p
+        for fn_name in (
+            "ei_region_get_x",
+            "ei_region_get_y",
+            "ei_region_get_width",
+            "ei_region_get_height",
+        ):
+            if hasattr(c, fn_name):
+                fn = getattr(c, fn_name)
+                fn.argtypes = [ctypes.c_void_p]
+                fn.restype = ctypes.c_uint32
+
         # Seat binding (required for sender clients to receive devices)
         if hasattr(c, "ei_event_get_seat"):
             c.ei_event_get_seat.argtypes = [ctypes.c_void_p]
@@ -266,10 +280,32 @@ class EIClient:
         self.scroll_device: Any = None
         self._connected = False
         self._emulating_devices: set[Any] = set()
+        self._emulation_seq: int = 0
+        self._abs_regions: list[tuple[int, int, int, int]] = []
         self._in_drag = False
 
         if fd is not None and libei.available:
             self._init_session(fd)
+
+    def _inspect_abs_regions(self, device: Any) -> list[tuple[int, int, int, int]]:
+        """Reads configured coordinate regions for an absolute pointer device."""
+        c = libei._cdll
+        if not c or not hasattr(c, "ei_device_get_region"):
+            return []
+        regions: list[tuple[int, int, int, int]] = []
+        for idx in range(16):
+            reg = c.ei_device_get_region(device, ctypes.c_size_t(idx))
+            if not isinstance(reg, int) or reg <= 0:
+                break
+            try:
+                rx = int(c.ei_region_get_x(reg))
+                ry = int(c.ei_region_get_y(reg))
+                rw = int(c.ei_region_get_width(reg))
+                rh = int(c.ei_region_get_height(reg))
+                regions.append((rx, ry, rw, rh))
+            except Exception:
+                break
+        return regions
 
     def _start_emulating(self, dev: Any) -> None:
         """Ensures a device enters emulation mode before sending events."""
@@ -277,7 +313,8 @@ class EIClient:
             return
         if dev not in self._emulating_devices:
             try:
-                libei._cdll.ei_device_start_emulating(dev, ctypes.c_uint32(0))
+                self._emulation_seq += 1
+                libei._cdll.ei_device_start_emulating(dev, ctypes.c_uint32(self._emulation_seq))
                 self._emulating_devices.add(dev)
             except Exception as exc:
                 logger.debug("ei_device_start_emulating error: %s", exc)
@@ -360,7 +397,12 @@ class EIClient:
                             if has_cap(device, self.EI_DEVICE_CAP_POINTER_ABSOLUTE):
                                 self.pointer_abs_device = device
                                 self.pointer_device = self.pointer_device or device
-                                logger.info("libei: acquired absolute pointer device")
+                                regions = self._inspect_abs_regions(device)
+                                self._abs_regions = regions
+                                logger.info(
+                                    "libei: acquired absolute pointer device (regions=%s)",
+                                    regions,
+                                )
                             if has_cap(device, self.EI_DEVICE_CAP_POINTER):
                                 self.pointer_rel_device = device
                                 self.pointer_device = self.pointer_device or device
@@ -385,25 +427,53 @@ class EIClient:
             return int(libei._cdll.ei_now(self.ctx))
         return int(time.time() * 1_000_000)
 
-    def pointer_motion_absolute(self, x: float, y: float) -> None:
-        """Move cursor to absolute coordinates (x, y)."""
+    @property
+    def has_absolute_pointer(self) -> bool:
+        """True if an absolute pointer device (or unknown-cap fallback) is active."""
+        if not libei.available or not self.ctx:
+            return True
+        if self.pointer_abs_device is not None:
+            return True
+        return (
+            self.pointer_device is not None and self.pointer_device is not self.pointer_rel_device
+        )
+
+    def _resolve_abs_pointer_device(self) -> Any:
+        """Returns a pointer device supporting EI_DEVICE_CAP_POINTER_ABSOLUTE, or None."""
+        dev = self.pointer_abs_device
+        if not dev and self.pointer_device and self.pointer_device is not self.pointer_rel_device:
+            dev = self.pointer_device
+        return dev
+
+    def pointer_motion_absolute(self, x: float, y: float) -> bool:
+        """Move cursor to absolute coordinates (x, y). Returns False if unsupported."""
         if not libei.available or not self.ctx:
             logger.info("Mock EIS: pointer_motion_absolute(%s, %s)", x, y)
-            return
+            return True
 
         c = libei._cdll
-        dev = self.pointer_abs_device or self.pointer_device
+        dev = self._resolve_abs_pointer_device()
         if not dev:
             self.poll_events()
-            dev = self.pointer_abs_device or self.pointer_device
+            dev = self._resolve_abs_pointer_device()
 
-        if dev:
-            t = self._get_time_now()
-            self._start_emulating(dev)
-            c.ei_device_pointer_motion_absolute(dev, ctypes.c_double(x), ctypes.c_double(y))
-            c.ei_device_frame(dev, t)
-            if not self._in_drag:
-                self._stop_emulating(dev)
+        if not dev:
+            logger.warning(
+                "libei: no absolute pointer device available (rel_only=%s); "
+                "cannot position cursor at (%.1f, %.1f)",
+                self.pointer_rel_device is not None,
+                x,
+                y,
+            )
+            return False
+
+        t = self._get_time_now()
+        self._start_emulating(dev)
+        c.ei_device_pointer_motion_absolute(dev, ctypes.c_double(x), ctypes.c_double(y))
+        c.ei_device_frame(dev, t)
+        if not self._in_drag:
+            self._stop_emulating(dev)
+        return True
 
     def pointer_motion(self, dx: float, dy: float) -> None:
         """Move cursor relatively by (dx, dy)."""

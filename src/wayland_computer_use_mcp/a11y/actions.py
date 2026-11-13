@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Any
 
 from dbus_fast import Message, MessageType, Variant
 
@@ -342,6 +343,97 @@ def _prepare_pointer_target(pid: int, target_x: int, target_y: int) -> tuple[int
     return cx, cy
 
 
+def _has_unknown_window_offset(pid: int) -> bool:
+    """True when live compositor IPC cannot resolve the window's screen offset (e.g. GNOME)."""
+    from wayland_computer_use_mcp.portal import global_portal_session
+
+    if global_portal_session.is_mock or pid <= 0:
+        return False
+    try:
+        from wayland_computer_use_mcp.compositors import query_window_geometry
+
+        return query_window_geometry(pid=pid) is None
+    except Exception:
+        return False
+
+
+async def _find_focused_child_index(bus_name: str, path: str) -> int:
+    """Returns the index of the focused child inside a container node, or 0 if unknown."""
+    inspector = AtspiInspector()
+    if not await inspector.connect() or not inspector.bus:
+        return 0
+    try:
+        rep = await inspector.bus.call(
+            Message(
+                destination=bus_name,
+                path=path,
+                interface="org.a11y.atspi.Accessible",
+                member="GetChildren",
+            )
+        )
+        children = rep.body[0] if rep and rep.body else []
+        for idx, (ch_bus, ch_path) in enumerate(children):
+            st_rep = await inspector.bus.call(
+                Message(
+                    destination=ch_bus,
+                    path=ch_path,
+                    interface="org.a11y.atspi.Accessible",
+                    member="GetState",
+                )
+            )
+            if st_rep and st_rep.body and "focused" in inspector._decode_states(st_rep.body[0]):
+                return idx
+        return 0
+    except Exception:
+        return 0
+    finally:
+        await inspector.close()
+
+
+def _activate_combobox_item_via_keyboard(
+    pid: int,
+    node_id: str,
+    name: str,
+    role: str,
+    container_bus: str,
+    container_path: str,
+    target_idx: int,
+) -> str | None:
+    """Navigates to target_idx inside a focused dropdown list via arrow + Return keys."""
+    from wayland_computer_use_mcp.portal import global_portal_session
+
+    try:
+        focused_idx = int(_run_async_sync(_find_focused_child_index, container_bus, container_path))
+        delta = target_idx - focused_idx
+        key = "down" if delta > 0 else "up"
+        for _ in range(abs(delta)):
+            global_portal_session.dispatch_key_combination([key])
+            time.sleep(0.03)
+        global_portal_session.dispatch_key_combination(["return"])
+        return (
+            f"Selected {node_id} ('{name}' [{role}]) in dropdown "
+            f"via keyboard navigation (delta={delta})."
+        )
+    except Exception as exc:
+        logger.debug("Dropdown keyboard navigation failed: %s", exc)
+        return None
+
+
+def _find_actionable_child(
+    node: dict[str, Any], target_roles: tuple[str, ...], max_depth: int = 2
+) -> dict[str, Any] | None:
+    """BFS for the first descendant matching one of target_roles with a D-Bus reference."""
+    queue: list[tuple[dict[str, Any], int]] = [(ch, 1) for ch in node.get("children", [])]
+    while queue:
+        cur, depth = queue.pop(0)
+        if cur.get("role", "").lower() in target_roles and cur.get("bus_name") and cur.get("path"):
+            return cur
+        if depth < max_depth:
+            for ch in cur.get("children", []):
+                queue.append((ch, depth + 1))
+    return None
+
+
 def invoke_node_action(
     pid: int,
     node_id: str,
@@ -399,6 +491,30 @@ def invoke_node_action(
 
         if level1_success:
             return f"Activated {node_id} ('{name}' [{role}]) via AT-SPI."
+
+        # Composite dropdowns (e.g. GTK4 Gtk.DropDown) expose NActions=0 on the outer
+        # combo box while an internal toggle/push button performs the popup open action.
+        if role in ("combo box", "combobox", "dropdown", "drop down"):
+            child_btn = _find_actionable_child(
+                cached, ("toggle button", "push button", "button"), max_depth=2
+            )
+            if child_btn:
+                ch_bus = child_btn.get("bus_name")
+                ch_path = child_btn.get("path")
+                if ch_bus and ch_path:
+                    try:
+                        if do_accessible_action(ch_bus, ch_path, 0):
+                            return (
+                                f"Activated {node_id} ('{name}' [{role}]) via child "
+                                f"{child_btn.get('role')} via AT-SPI."
+                            )
+                    except Exception as exc:
+                        logger.debug(
+                            "Child button DoAction failed on %s %s: %s",
+                            ch_bus,
+                            ch_path,
+                            exc,
+                        )
 
         # Semantic Parent Bubbling: If target lacks DoAction or failed (e.g. static
         # label or icon), walk up ancestor chain to find actionable container.
@@ -461,32 +577,47 @@ def invoke_node_action(
                             exc,
                         )
 
-                    # If DoAction failed on list item, check if container supports SelectChild
-                    if (
-                        not is_inside_combobox
-                        and anc_role in ("list item", "table row")
-                        and i + 1 < len(ancestors)
-                    ):
+                    # If DoAction failed on list item, check container SelectChild
+                    # (or arrow+Return keyboard fallback on GNOME with unknown offset).
+                    if anc_role in ("list item", "table row") and i + 1 < len(ancestors):
                         container_anc = ancestors[i + 1]
                         if container_anc.get("role") in ("list", "table", "tree table", "tree"):
                             c_bus = container_anc.get("bus_name")
                             c_path = container_anc.get("path")
                             idx = anc.get("index_in_parent", 0)
                             if c_bus and c_path:
-                                try:
-                                    if do_accessible_select_child(c_bus, c_path, idx):
-                                        return (
-                                            f"Selected {node_id} ('{name}' [{role}]) via "
-                                            f"container {container_anc.get('role')} "
-                                            f"SelectChild({idx}) via AT-SPI."
-                                        )
-                                except Exception as exc:
-                                    logger.debug(
-                                        "Container SelectChild failed on %s %s: %s",
-                                        c_bus,
-                                        c_path,
-                                        exc,
+                                if is_inside_combobox and _has_unknown_window_offset(pid):
+                                    kbd_msg = _activate_combobox_item_via_keyboard(
+                                        pid, node_id, name, role, c_bus, c_path, idx
                                     )
+                                    if kbd_msg:
+                                        return kbd_msg
+                                elif not is_inside_combobox:
+                                    try:
+                                        if do_accessible_select_child(c_bus, c_path, idx):
+                                            return (
+                                                f"Selected {node_id} ('{name}' [{role}]) via "
+                                                f"container {container_anc.get('role')} "
+                                                f"SelectChild({idx}) via AT-SPI."
+                                            )
+                                    except Exception as exc:
+                                        logger.debug(
+                                            "Container SelectChild failed on %s %s: %s",
+                                            c_bus,
+                                            c_path,
+                                            exc,
+                                        )
+
+        if (
+            role in ("check box", "checkbox", "toggle button", "radio button", "radiobutton")
+            and "focused" in cached.get("states", [])
+            and _has_unknown_window_offset(pid)
+        ):
+            try:
+                global_portal_session.dispatch_key_combination(["space"])
+                return f"Toggled focused {node_id} ('{name}' [{role}]) via spacebar."
+            except Exception as exc:
+                logger.debug("Focused checkbox spacebar toggle failed: %s", exc)
 
         cx, cy = _prepare_pointer_target(pid, target_x, target_y)
         click_msg = global_portal_session.dispatch_click(cx, cy, button="left")

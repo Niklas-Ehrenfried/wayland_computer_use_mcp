@@ -89,10 +89,18 @@ def get_artifacts_dir(subdir: str = "screenshots") -> Path:
 
     workspace = _find_workspace_root()
     if workspace is not None:
-        target_dir = workspace / ".agents" / "artifacts" / subdir
-    else:
-        cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-        target_dir = cache_home / "wayland-computer-use-mcp" / "artifacts" / subdir
+        candidate = workspace / ".agents" / "artifacts" / subdir
+        try:
+            import tempfile
 
+            candidate.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryFile(dir=candidate):
+                pass
+            return candidate
+        except OSError:
+            pass
+
+    cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    target_dir = cache_home / "wayland-computer-use-mcp" / "artifacts" / subdir
     target_dir.mkdir(parents=True, exist_ok=True)
     return target_dir

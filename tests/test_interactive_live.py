@@ -79,7 +79,7 @@ def test_visible_interactive_gui_workflow():
             {"action": "click", "node_id": btn_elem["id"]},
         ]
         batch_res = batch_actions(batch, pid=pid)
-        assert batch_res["status"] == "success"
+        assert batch_res["status"] == "success", batch_res
         assert batch_res["executed_steps_count"] == 3
 
         # 7. Test fail-fast reporting with intentional invalid node ID

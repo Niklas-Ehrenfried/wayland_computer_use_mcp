@@ -323,3 +323,60 @@ async def test_compositor_protocol_stubs():
     assert await CompositorBackend.get_active_displays(None) is None
     assert await CompositorBackend.set_window_state(None, 1, "minimize") is None
     assert await CompositorBackend.ensure_dialogs_above(None) is None
+
+
+@pytest.mark.asyncio
+async def test_gnome_backend_unwraps_dbus_variants_and_handles_error():
+    """GnomeBackend must unwrap dbus_fast Variants for rect, flat keys, and handle D-Bus errors."""
+    from dbus_fast import MessageType, Variant
+
+    backend = GnomeBackend()
+    mock_bus = AsyncMock()
+    mock_bus.disconnect = MagicMock()
+
+    # 1. Variant-wrapped flat geometry keys (x, y, width, height)
+    flat_reply = MagicMock()
+    flat_reply.message_type = MessageType.METHOD_RETURN
+    flat_reply.body = [
+        {
+            2001: {
+                "pid": Variant("u", 7777),
+                "title": Variant("s", "Wayland MCP Test Rig"),
+                "x": Variant("i", 280),
+                "y": Variant("i", 96),
+                "width": Variant("u", 720),
+                "height": Variant("u", 640),
+            }
+        }
+    ]
+    mock_bus.call.return_value = flat_reply
+
+    with patch("wayland_computer_use_mcp.compositors.gnome.MessageBus") as mock_bus_cls:
+        mock_bus_cls.return_value.connect = AsyncMock(return_value=mock_bus)
+        geom = await backend.get_window_geometry(pid=7777)
+        assert geom is not None
+        assert geom.tuple == (280, 96, 720, 640)
+
+        # 2. Variant-wrapped rect array
+        rect_reply = MagicMock()
+        rect_reply.message_type = MessageType.METHOD_RETURN
+        rect_reply.body = [
+            {
+                2002: {
+                    "pid": Variant("u", 8888),
+                    "title": Variant("s", "Other"),
+                    "rect": Variant("(iiii)", (10, 40, 500, 400)),
+                }
+            }
+        ]
+        mock_bus.call.return_value = rect_reply
+        geom_rect = await backend.get_window_geometry(pid=8888)
+        assert geom_rect is not None
+        assert geom_rect.tuple == (10, 40, 500, 400)
+
+        # 3. AccessDenied / MessageType.ERROR returns None gracefully
+        err_reply = MagicMock()
+        err_reply.message_type = MessageType.ERROR
+        err_reply.body = ["App introspection is disabled"]
+        mock_bus.call.return_value = err_reply
+        assert await backend.get_window_geometry(pid=7777) is None

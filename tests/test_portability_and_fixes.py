@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from unittest.mock import MagicMock
 
+import pytest
+
 from wayland_computer_use_mcp import __version__
 from wayland_computer_use_mcp.a11y import flatten_tree
 from wayland_computer_use_mcp.artifacts import get_artifacts_dir
@@ -149,6 +151,49 @@ def test_launch_app_restart_updates_target_pid_and_elements(tmp_path, monkeypatc
             terminate(pid2)
         except Exception:
             pass
+        global_portal_session.target_pid = None
+
+
+def test_launch_app_live_mode_launches_before_portal_prompt(monkeypatch):
+    from wayland_computer_use_mcp.config import Config, get_config, set_config
+    from wayland_computer_use_mcp.portal import global_portal_session
+    from wayland_computer_use_mcp.tools import process_tools
+
+    prev_cfg = get_config()
+    call_order: list[str] = []
+    terminated: list[int] = []
+
+    try:
+        set_config(Config(display_mode="live", mock_mode=False))
+        monkeypatch.setattr(global_portal_session, "is_active", lambda: False)
+        monkeypatch.setattr(process_tools, "ensure_portal_dialogs_above", lambda: True)
+        monkeypatch.setattr(
+            process_tools, "launch", lambda t, a, c: call_order.append("launch") or 555
+        )
+        monkeypatch.setattr(
+            process_tools,
+            "_ensure_session_initialized",
+            lambda: call_order.append("portal"),
+        )
+        monkeypatch.setattr(process_tools, "_bind_focus_and_collect_elements", lambda pid: [])
+
+        res = launch_app("examples/test_gui_app.py")
+        assert res["pid"] == 555
+        assert call_order == ["launch", "portal"]
+
+        # Verify spawned app is cleaned up if user cancels the portal prompt
+        call_order.clear()
+        monkeypatch.setattr(
+            process_tools,
+            "_ensure_session_initialized",
+            lambda: (_ for _ in ()).throw(RuntimeError("cancelled")),
+        )
+        monkeypatch.setattr(process_tools, "terminate", lambda pid: terminated.append(pid))
+        with pytest.raises(RuntimeError, match="cancelled"):
+            launch_app("examples/test_gui_app.py")
+        assert terminated == [555]
+    finally:
+        set_config(prev_cfg)
         global_portal_session.target_pid = None
 
 

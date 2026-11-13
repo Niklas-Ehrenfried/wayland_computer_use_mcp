@@ -60,16 +60,7 @@ async def resolve_atspi_bus_address(force_refresh: bool = False) -> str | None:
         try:
             from dbus_fast import Variant
 
-            await session_bus.call(
-                Message(
-                    destination="org.a11y.Bus",
-                    path="/org/a11y/bus",
-                    interface="org.freedesktop.DBus.Properties",
-                    member="Set",
-                    signature="ssv",
-                    body=["org.a11y.Status", "ScreenReaderEnabled", Variant("b", True)],
-                )
-            )
+            # Enable toolkit accessibility only (ScreenReaderEnabled launches Orca on GNOME)
             await session_bus.call(
                 Message(
                     destination="org.a11y.Bus",
@@ -295,7 +286,7 @@ class AtspiInspector:
             except Exception:
                 pass
 
-            if current_depth == 0:
+            if current_depth == 0 or node["role"] in ("frame", "window", "dialog"):
                 try:
                     screen_reply = await self.bus.call(
                         Message(

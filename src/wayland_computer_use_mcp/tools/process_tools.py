@@ -62,11 +62,14 @@ def launch_app(
     If restart=True or if the app is already running, gracefully terminates the old process
     and launches a fresh instance.
     """
+    from wayland_computer_use_mcp.config import get_config
+
     ensure_portal_dialogs_above()
-    _ensure_session_initialized()
+    cfg = get_config()
 
     current_pid = global_portal_session.target_pid
     if restart and current_pid and is_responsive(current_pid):
+        _ensure_session_initialized()
         try:
             minimize_window(current_pid)
             new_pid = restart_process(current_pid)
@@ -84,7 +87,31 @@ def launch_app(
         except Exception as exc:
             logger.warning("Hot restart failed, falling back to clean launch: %s", exc)
 
+    # In live window-selection mode before a portal session exists, launch the target app first so
+    # its window is visible in the OS portal picker; in virtual/mock mode, init first so
+    # WAYLAND_DISPLAY points to the isolated compositor before spawning the app.
+    defer_portal_init = (
+        not global_portal_session.is_active()
+        and cfg.display_mode != "virtual"
+        and not cfg.mock_mode
+    )
+    if not defer_portal_init:
+        _ensure_session_initialized()
+
     pid = launch(target, args or [], cwd)
+    if defer_portal_init:
+        import time
+
+        time.sleep(0.5)
+        try:
+            _ensure_session_initialized()
+        except Exception:
+            try:
+                terminate(pid)
+            except Exception:
+                pass
+            raise
+
     initial_elements = _bind_focus_and_collect_elements(pid)
 
     return {

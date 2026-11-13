@@ -267,6 +267,41 @@ class PortalSession:
         except Exception:
             return None
 
+    @staticmethod
+    def _extract_tree_window_bounds(tree: dict[str, Any]) -> tuple[int, int, int, int] | None:
+        """Extracts positive window geometry from an AT-SPI tree root or top-level frame child."""
+        candidates: list[dict[str, Any]] = [tree]
+        for child in tree.get("children", []):
+            if isinstance(child, dict) and str(child.get("role", "")).lower() in (
+                "frame",
+                "window",
+                "dialog",
+            ):
+                candidates.append(child)
+        for node in candidates:
+            sb = node.get("screen_bounds") or node.get("bounds")
+            if sb and len(sb) >= 4 and int(sb[2]) > 0 and int(sb[3]) > 0:
+                return (max(0, int(sb[0])), max(0, int(sb[1])), int(sb[2]), int(sb[3]))
+        return None
+
+    def _resolve_target_geometry(self) -> tuple[int, int, int, int] | None:
+        """Resolves active target window geometry via compositor D-Bus or AT-SPI fallback."""
+        if not self.target_pid:
+            return None
+        from wayland_computer_use_mcp.compositors import query_window_geometry
+
+        title = self._resolve_target_title()
+        geom = query_window_geometry(pid=self.target_pid, title=title)
+        if geom:
+            return geom
+        try:
+            from wayland_computer_use_mcp.a11y import get_application_tree
+
+            tree = get_application_tree(self.target_pid)
+            return self._extract_tree_window_bounds(tree)
+        except Exception:
+            return None
+
     def capture_frame(
         self,
         crop_box: list[int] | None = None,
@@ -285,30 +320,13 @@ class PortalSession:
                     + (f"Last error: {self._last_portal_error}" if self._last_portal_error else "")
                 )
 
-        geom: tuple[int, int, int, int] | None = None
-        if self.target_pid:
-            from wayland_computer_use_mcp.compositors import query_window_geometry
-
-            title = self._resolve_target_title()
-            geom = query_window_geometry(pid=self.target_pid, title=title)
-
-            if not geom:
-                try:
-                    from wayland_computer_use_mcp.a11y import get_application_tree
-
-                    tree = get_application_tree(self.target_pid)
-                    sb = tree.get("screen_bounds") or tree.get("bounds")
-                    if sb and len(sb) >= 4 and sb[2] > 0 and sb[3] > 0:
-                        geom = (int(sb[0]), int(sb[1]), int(sb[2]), int(sb[3]))
-                except Exception:
-                    pass
-
-            if geom:
-                wx, wy, ww, wh = geom
-                self.window_offset_x = wx
-                self.window_offset_y = wy
-                global_clamper.set_bounds(ww, wh)
-                global_geometry_detector.record_capture(ww, wh, wx, wy)
+        geom = self._resolve_target_geometry()
+        if geom:
+            wx, wy, ww, wh = geom
+            self.window_offset_x = wx
+            self.window_offset_y = wy
+            global_clamper.set_bounds(ww, wh)
+            global_geometry_detector.record_capture(ww, wh, wx, wy)
             time.sleep(0.05)
 
         frame = self._screencast.pull_frame()
@@ -364,20 +382,7 @@ class PortalSession:
                 "No active managed application. "
                 "Action blocked to prevent unintended desktop interaction."
             )
-        from wayland_computer_use_mcp.compositors import query_window_geometry
-
-        title = self._resolve_target_title()
-        geom = query_window_geometry(pid=self.target_pid, title=title)
-        if not geom:
-            try:
-                from wayland_computer_use_mcp.a11y import get_application_tree
-
-                tree = get_application_tree(self.target_pid)
-                sb = tree.get("screen_bounds") or tree.get("bounds")
-                if sb and len(sb) >= 4 and sb[2] > 0 and sb[3] > 0:
-                    geom = (int(sb[0]), int(sb[1]), int(sb[2]), int(sb[3]))
-            except Exception:
-                pass
+        geom = self._resolve_target_geometry()
 
         if not geom:
             raise RuntimeError(

@@ -10,7 +10,7 @@ import logging
 import os
 from typing import Any
 
-from dbus_fast import BusType, Message
+from dbus_fast import BusType, Message, MessageType
 from dbus_fast.aio import MessageBus
 
 from wayland_computer_use_mcp.compositors.base import (
@@ -23,10 +23,16 @@ from wayland_computer_use_mcp.compositors.base import (
 logger = logging.getLogger(__name__)
 
 
+def _unwrap_variant(val: Any) -> Any:
+    """Recursively unwraps dbus_fast Variant wrappers when present."""
+    return val.value if hasattr(val, "value") else val
+
+
 class GnomeBackend(CompositorBackend):
     """Compositor backend for GNOME Shell / Mutter Wayland sessions."""
 
     name: str = "gnome"
+    _warned_introspect: bool = False
 
     async def is_available(self) -> bool:
         if not os.environ.get("WAYLAND_DISPLAY"):
@@ -66,27 +72,61 @@ class GnomeBackend(CompositorBackend):
             reply = await bus.call(msg)
             bus.disconnect()
 
-            if not reply.body or not isinstance(reply.body[0], dict):
+            if reply.message_type == MessageType.ERROR:
+                if not self._warned_introspect:
+                    self._warned_introspect = True
+                    logger.warning(
+                        "GNOME Introspect GetWindows denied (%s); window screen offsets "
+                        "will default to (0, 0) unless unsafe_mode=true.",
+                        reply.body,
+                    )
                 return None
 
-            windows: dict[int, dict[str, Any]] = reply.body[0]
+            raw_windows = _unwrap_variant(reply.body[0]) if reply.body else None
+            if not isinstance(raw_windows, dict):
+                return None
+
+            windows: dict[int, dict[str, Any]] = raw_windows
             for _, win in windows.items():
-                win_pid = win.get("pid", 0)
-                win_title = str(win.get("title", ""))
+                win_data = _unwrap_variant(win)
+                if not isinstance(win_data, dict):
+                    continue
+                win_pid = _unwrap_variant(win_data.get("pid", 0))
+                win_title = str(_unwrap_variant(win_data.get("title", "")) or "")
                 match = False
-                if pid and win_pid == pid:
-                    match = True
-                elif title and title.lower() in win_title.lower():
+                if pid and win_pid is not None:
+                    try:
+                        match = int(win_pid) == pid
+                    except (TypeError, ValueError):
+                        match = False
+                if not match and title and title.lower() in win_title.lower():
                     match = True
 
                 if match:
-                    rect = win.get("rect")
+                    rect = _unwrap_variant(win_data.get("rect"))
                     if rect and len(rect) >= 4:
                         return WindowGeometry(
-                            x=int(rect[0]),
-                            y=int(rect[1]),
-                            width=int(rect[2]),
-                            height=int(rect[3]),
+                            x=int(_unwrap_variant(rect[0])),
+                            y=int(_unwrap_variant(rect[1])),
+                            width=int(_unwrap_variant(rect[2])),
+                            height=int(_unwrap_variant(rect[3])),
+                        )
+                    wx = _unwrap_variant(win_data.get("x"))
+                    wy = _unwrap_variant(win_data.get("y"))
+                    ww = _unwrap_variant(win_data.get("width"))
+                    wh = _unwrap_variant(win_data.get("height"))
+                    if None not in (wx, wy, ww, wh) and int(ww) > 0 and int(wh) > 0:
+                        return WindowGeometry(
+                            x=int(wx),
+                            y=int(wy),
+                            width=int(ww),
+                            height=int(wh),
+                        )
+                    if not self._warned_introspect:
+                        self._warned_introspect = True
+                        logger.info(
+                            "GNOME Introspect matched window without x/y bounds (keys=%s)",
+                            sorted(win_data.keys()),
                         )
             return None
         except Exception as exc:

@@ -195,17 +195,52 @@ class RemoteDesktopClient:
         self.session_handle = str(create_res["session_handle"])
         _debug_log(f"RemoteDesktop session created: {self.session_handle}")
 
-        # 2. Select ScreenCast sources
+        # 2. Select RemoteDesktop devices (Pointer | Keyboard) + persistence (v2+)
         stored_token = global_token_store.get_token(active_app_id)
+        supports_rd_persist = True
+        try:
+            ver_reply = await bus.call(
+                Message(
+                    destination=self.PORTAL_BUS,
+                    path=self.PORTAL_PATH,
+                    interface="org.freedesktop.DBus.Properties",
+                    member="Get",
+                    signature="ss",
+                    body=["org.freedesktop.portal.RemoteDesktop", "version"],
+                )
+            )
+            if ver_reply and ver_reply.message_type != MessageType.ERROR and ver_reply.body:
+                ver_val = ver_reply.body[0]
+                if isinstance(ver_val, Variant):
+                    ver_val = ver_val.value
+                supports_rd_persist = int(ver_val) >= 2
+        except Exception:
+            pass
+
+        device_opts: dict[str, Any] = {
+            "handle_token": Variant("s", f"r_rd_sel_{ts}"),
+            "types": Variant("u", 1 | 2),  # Pointer=1, Keyboard=2
+        }
+        if supports_rd_persist:
+            device_opts["persist_mode"] = Variant("u", 2)
+            if stored_token:
+                device_opts["restore_token"] = Variant("s", stored_token)
+                _debug_log(f"Using restore token for RemoteDesktop: {stored_token[:8]}...")
+
+        await call_portal_action(
+            "org.freedesktop.portal.RemoteDesktop",
+            "SelectDevices",
+            "oa{sv}",
+            [self.session_handle, device_opts],
+            f"r_rd_sel_{ts}",
+        )
+
+        # 3. Select ScreenCast sources (persistence belongs on RemoteDesktop.SelectDevices)
         screencast_opts: dict[str, Any] = {
             "handle_token": Variant("s", f"r_sc_sel_{ts}"),
             "types": Variant("u", int(get_config().source_type)),
             "multiple": Variant("b", False),
-            "persist_mode": Variant("u", 2),
         }
-        if stored_token:
-            screencast_opts["restore_token"] = Variant("s", stored_token)
-            _debug_log(f"Using restore token for ScreenCast: {stored_token[:8]}...")
 
         await call_portal_action(
             "org.freedesktop.portal.ScreenCast",
@@ -213,21 +248,6 @@ class RemoteDesktopClient:
             "oa{sv}",
             [self.session_handle, screencast_opts],
             f"r_sc_sel_{ts}",
-        )
-
-        # 3. Select RemoteDesktop devices (Pointer | Keyboard)
-        await call_portal_action(
-            "org.freedesktop.portal.RemoteDesktop",
-            "SelectDevices",
-            "oa{sv}",
-            [
-                self.session_handle,
-                {
-                    "handle_token": Variant("s", f"r_rd_sel_{ts}"),
-                    "types": Variant("u", 1 | 2),  # Pointer=1, Keyboard=2
-                },
-            ],
-            f"r_rd_sel_{ts}",
         )
 
         # 3b. Opt into XDG Portal Clipboard (xdg-desktop-portal >= 1.18) if supported
@@ -272,11 +292,21 @@ class RemoteDesktopClient:
                 s0 = s0.value
             self.pipewire_node_id = int(s0[0])
             _debug_log(f"PipeWire Node ID resolved: {self.pipewire_node_id}")
+        else:
+            logger.warning(
+                "Portal Start returned no ScreenCast streams; PipeWire capture and "
+                "absolute EIS pointer coordinates require sharing a screen/window source."
+            )
+            _debug_log("Start returned NO streams; ScreenCast + abs pointer unavailable.")
 
         new_restore_token = start_results.get("restore_token")
-        if new_restore_token:
-            self.restore_token = str(new_restore_token)
-            global_token_store.set_token(active_app_id, self.restore_token)
+        if self.pipewire_node_id:
+            if new_restore_token:
+                self.restore_token = str(new_restore_token)
+                global_token_store.set_token(active_app_id, self.restore_token)
+        elif stored_token:
+            # Do not keep a broken/streamless token that silently bypasses ScreenCast sharing
+            global_token_store.delete_token(active_app_id)
 
         # 5. Connect to EIS for input injection on the already-authorized session
         _debug_log("Connecting to EIS via D-Bus RemoteDesktop.ConnectToEIS...")

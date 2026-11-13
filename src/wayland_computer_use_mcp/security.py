@@ -119,6 +119,25 @@ class TokenStore:
             except OSError:
                 pass
 
+    def delete_token(self, app_id: str) -> bool:
+        """Remove a stored restore token for an app_id if present."""
+        with self._lock:
+            tokens = self._load_tokens()
+            if app_id not in tokens:
+                return False
+            del tokens[app_id]
+            content = json.dumps(tokens, indent=2)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            mode = stat.S_IRUSR | stat.S_IWUSR
+            fd = os.open(self._path, flags, mode)
+            with open(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+            try:
+                os.chmod(self._path, stat.S_IRUSR | stat.S_IWUSR)
+            except OSError:
+                pass
+            return True
+
 
 class SystemShortcutFilter:
     """Enforces strict isolation by blocking system-level and desktop-wide shortcuts.

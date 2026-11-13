@@ -208,3 +208,27 @@ def test_wrap_with_delta_returns_interaction_result():
     assert res["action"] == "test_action"
     assert res["target"] == "target_element"
     assert "Action performed cleanly" in res
+
+
+def test_get_artifacts_dir_falls_back_when_workspace_readonly(tmp_path, monkeypatch):
+    from wayland_computer_use_mcp import artifacts
+
+    monkeypatch.delenv("WAYLAND_MCP_SAVE_FRAMES_DIR", raising=False)
+    monkeypatch.delenv("WAYLAND_MCP_ARTIFACTS_DIR", raising=False)
+    ro_ws = tmp_path / "ro_repo"
+    ro_ws.mkdir()
+    cache_home = tmp_path / "cache"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache_home))
+    monkeypatch.setattr(artifacts, "_find_workspace_root", lambda: ro_ws)
+
+    orig_mkdir = artifacts.Path.mkdir
+
+    def fake_mkdir(self, *args, **kwargs):
+        if str(ro_ws) in str(self):
+            raise PermissionError("read-only virtiofs mount")
+        return orig_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(artifacts.Path, "mkdir", fake_mkdir)
+    resolved = artifacts.get_artifacts_dir("screenshots")
+    assert resolved == cache_home / "wayland-computer-use-mcp" / "artifacts" / "screenshots"
+    assert resolved.is_dir()

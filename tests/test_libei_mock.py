@@ -155,3 +155,53 @@ def test_eiclient_event_handling(monkeypatch):
     assert client.pointer_abs_device == mock_dev
     assert client.button_device == mock_dev
     client.close()
+
+
+def test_eiclient_relative_only_pointer_rejects_absolute_motion(monkeypatch):
+    """Relative-only EIS devices must not be passed to ei_device_pointer_motion_absolute."""
+    mock_c = MagicMock()
+    mock_c.ei_new_sender.return_value = 0x1000
+    mock_c.ei_setup_backend_fd.return_value = 0
+
+    events = [0x5003]
+    mock_c.ei_get_event.side_effect = lambda ctx: events.pop(0) if events else None
+    mock_c.ei_event_get_type.return_value = EIClient.EI_EVENT_DEVICE_ADDED
+    mock_dev = 0x4000
+    mock_c.ei_event_get_device.return_value = mock_dev
+    mock_c.ei_device_has_capability.side_effect = lambda dev, cap: (
+        cap in (EIClient.EI_DEVICE_CAP_POINTER, EIClient.EI_DEVICE_CAP_BUTTON)
+    )
+
+    monkeypatch.setattr(libei, "available", True, raising=False)
+    monkeypatch.setattr(libei, "_cdll", mock_c, raising=False)
+
+    client = EIClient(fd=56)
+    assert client.pointer_abs_device is None
+    assert client.pointer_rel_device == mock_dev
+    assert client.has_absolute_pointer is False
+
+    moved = client.pointer_motion_absolute(120.0, 240.0)
+    assert moved is False
+    mock_c.ei_device_pointer_motion_absolute.assert_not_called()
+    client.close()
+
+
+def test_eiclient_start_emulating_increments_sequence(monkeypatch):
+    """_start_emulating must pass strictly increasing sequence numbers per cycle."""
+    mock_c = MagicMock()
+    mock_c.ei_new_sender.return_value = 0x1000
+    mock_c.ei_setup_backend_fd.return_value = 0
+    mock_c.ei_get_event.return_value = None
+
+    monkeypatch.setattr(libei, "available", True, raising=False)
+    monkeypatch.setattr(libei, "_cdll", mock_c, raising=False)
+
+    client = EIClient(fd=57)
+    dev = 0x4000
+    client._start_emulating(dev)
+    client._stop_emulating(dev)
+    client._start_emulating(dev)
+
+    seqs = [call.args[1].value for call in mock_c.ei_device_start_emulating.call_args_list]
+    assert seqs == [1, 2]
+    client.close()

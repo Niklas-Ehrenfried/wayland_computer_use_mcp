@@ -57,7 +57,28 @@ class InputDispatcher:
 
     def _has_ei_pointer(self) -> bool:
         ei = self._get_ei_client()
-        return bool(ei and (ei.pointer_abs_device or ei.pointer_device or ei.button_device))
+        if not ei:
+            return False
+        if getattr(ei, "pointer_abs_device", None):
+            return True
+        pointer_dev = getattr(ei, "pointer_device", None)
+        rel_dev = getattr(ei, "pointer_rel_device", None)
+        return bool(pointer_dev and pointer_dev is not rel_dev)
+
+    def _require_pointer_targetable(self) -> None:
+        """Prevents clicking an unrelated cursor location when only relative EIS exists."""
+        ei = self._get_ei_client()
+        if (
+            isinstance(ei, EIClient)
+            and ei.ctx is not None
+            and not ei.has_absolute_pointer
+            and not getattr(self.rd_client, "pipewire_node_id", None)
+        ):
+            raise RuntimeError(
+                "Cannot move pointer to absolute coordinates: compositor EIS only provided "
+                "a relative pointer without a ScreenCast stream. Share a screen or window "
+                "in the OS portal permission prompt to enable absolute pointer control."
+            )
 
     def _has_ei_keyboard(self) -> bool:
         ei = self._get_ei_client()
@@ -90,6 +111,7 @@ class InputDispatcher:
             time.sleep(0.005)
             ei_client.button_click(button_code)
         else:
+            self._require_pointer_targetable()
             self.rd_client.notify_pointer_motion_absolute(target_x, target_y)
             time.sleep(0.005)
             self.rd_client.notify_pointer_button(button_code, True)
@@ -122,6 +144,7 @@ class InputDispatcher:
             time.sleep(0.005)
             ei_client.double_click(button_code)
         else:
+            self._require_pointer_targetable()
             self.rd_client.notify_pointer_motion_absolute(target_x, target_y)
             time.sleep(0.005)
             self.rd_client.notify_pointer_button(button_code, True)
@@ -152,6 +175,7 @@ class InputDispatcher:
             ei_client = self._get_ei_client()
             ei_client.pointer_motion_absolute(target_x, target_y)
         else:
+            self._require_pointer_targetable()
             self.rd_client.notify_pointer_motion_absolute(target_x, target_y)
 
         if duration_ms > 0:
@@ -190,6 +214,7 @@ class InputDispatcher:
             time.sleep(0.01)
             ei_client.button_up(BTN_LEFT)
         else:
+            self._require_pointer_targetable()
             self.rd_client.notify_pointer_motion_absolute(s_target_x, s_target_y)
             time.sleep(0.01)
             self.rd_client.notify_pointer_button(BTN_LEFT, True)
