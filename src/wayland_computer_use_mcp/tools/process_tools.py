@@ -170,7 +170,7 @@ def restart_app(pid: int | None = None) -> dict[str, Any]:
 
 
 def terminate_app(pid: int | None = None) -> dict[str, Any]:
-    """Terminates an owned application process."""
+    """Terminates an owned application process and closes idle virtual windows."""
     effective_pid = pid or global_portal_session.target_pid
     if not effective_pid:
         raise RuntimeError("No target PID to terminate.")
@@ -179,9 +179,17 @@ def terminate_app(pid: int | None = None) -> dict[str, Any]:
     if global_portal_session.target_pid == effective_pid:
         global_portal_session.target_pid = None
 
+    remaining = list_active_processes()
+    virtual_closed = False
+    if not remaining:
+        virtual_closed = global_portal_session.close_virtual_if_idle()
+    elif global_portal_session.target_pid is None:
+        global_portal_session.target_pid = remaining[-1]["pid"]
+
     return {
         "status": "terminated",
         "pid": effective_pid,
+        "virtual_session_closed": virtual_closed,
     }
 
 

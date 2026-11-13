@@ -7,9 +7,11 @@ import logging
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
+from pathlib import Path
 from typing import Any
 
 from wayland_computer_use_mcp.config import Config, detect_virtual_compositor_cmd
@@ -52,6 +54,124 @@ def _terminate_proc_group(proc: subprocess.Popen[Any] | None) -> None:
             else:
                 proc.kill()
         except Exception:
+            pass
+
+
+def _unmount_doc_portal(runtime_dir: str) -> None:
+    """Unmounts any FUSE document portal mount inside a temporary virtual runtime dir."""
+    doc_dir = os.path.join(runtime_dir, "doc")
+    if not os.path.exists(doc_dir):
+        return
+    for cmd in (
+        ["fusermount3", "-u", "-z", doc_dir],
+        ["fusermount", "-u", "-z", doc_dir],
+        ["umount", "-l", doc_dir],
+    ):
+        if shutil.which(cmd[0]):
+            try:
+                subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=1.5,
+                    check=False,
+                )
+            except Exception:
+                pass
+
+
+def _terminate_runtime_processes(runtime_dir: str) -> None:
+    """Terminates detached D-Bus-activated helpers still bound to runtime_dir."""
+    if not runtime_dir or not os.path.isdir(runtime_dir):
+        return
+    own_pid = os.getpid()
+    own_uid = os.geteuid()
+    marker = runtime_dir.encode("utf-8")
+    victims: list[int] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return
+
+    for name in entries:
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        if pid <= 1 or pid == own_pid:
+            continue
+        proc_dir = os.path.join("/proc", name)
+        try:
+            if os.stat(proc_dir).st_uid != own_uid:
+                continue
+            matched = False
+            for fname in ("environ", "cmdline"):
+                try:
+                    with open(os.path.join(proc_dir, fname), "rb") as fh:
+                        if marker in fh.read():
+                            matched = True
+                            break
+                except OSError:
+                    continue
+            if matched:
+                victims.append(pid)
+        except OSError:
+            continue
+
+    for pid in victims:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    if victims:
+        deadline = time.monotonic() + 0.8
+        remaining = set(victims)
+        while remaining and time.monotonic() < deadline:
+            for pid in list(remaining):
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    remaining.discard(pid)
+            if remaining:
+                time.sleep(0.05)
+        for pid in remaining:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+
+def _cleanup_runtime_artifacts(runtime_dir: str) -> None:
+    """Cleans up FUSE mounts, detached helper processes, and the temporary runtime dir."""
+    if not runtime_dir:
+        return
+    _unmount_doc_portal(runtime_dir)
+    _terminate_runtime_processes(runtime_dir)
+    _unmount_doc_portal(runtime_dir)
+    shutil.rmtree(runtime_dir, ignore_errors=True)
+
+
+def cleanup_stale_virtual_dirs() -> None:
+    """Removes orphaned /tmp/wayland_mcp_virtual_* directories left by dead MCP processes."""
+    tmp_root = Path(tempfile.gettempdir())
+    own_pid = os.getpid()
+    for candidate in tmp_root.glob("wayland_mcp_virtual_*"):
+        if not candidate.is_dir():
+            continue
+        pid_file = candidate / ".mcp_pid"
+        if not pid_file.is_file():
+            continue
+        try:
+            owner_pid = int(pid_file.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            continue
+        if owner_pid <= 1 or owner_pid == own_pid:
+            continue
+        try:
+            os.kill(owner_pid, 0)
+        except ProcessLookupError:
+            _cleanup_runtime_artifacts(str(candidate))
+        except OSError:
             pass
 
 
@@ -100,12 +220,17 @@ class VirtualSessionManager:
             return
 
         self._save_env()
+        cleanup_stale_virtual_dirs()
         host_xdg = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
         host_wl = current_display
 
         private_xdg = tempfile.mkdtemp(prefix="wayland_mcp_virtual_")
         try:
             os.chmod(private_xdg, 0o700)
+        except OSError:
+            pass
+        try:
+            Path(private_xdg, ".mcp_pid").write_text(str(os.getpid()), encoding="utf-8")
         except OSError:
             pass
         self.runtime_dir = private_xdg
@@ -292,7 +417,7 @@ class VirtualSessionManager:
         self._restore_env()
 
         if self.runtime_dir:
-            shutil.rmtree(self.runtime_dir, ignore_errors=True)
+            _cleanup_runtime_artifacts(self.runtime_dir)
             self.runtime_dir = None
 
         try:

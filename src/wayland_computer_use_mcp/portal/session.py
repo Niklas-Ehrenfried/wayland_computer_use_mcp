@@ -411,14 +411,15 @@ class PortalSession:
     def dispatch_clipboard_write(self, text: str) -> str:
         return self._input.dispatch_clipboard_write(text)
 
-    def close(self) -> None:
-        """Cleans up active screencast pipeline, remote desktop, libei, and event listeners."""
+    def _stop_session_resources(self) -> None:
+        """Closes screencast, remote desktop/EIS, AT-SPI listeners, and virtual compositor."""
         self._screencast.stop()
         self._rd_client.close()
         try:
-            from wayland_computer_use_mcp.a11y import global_event_listener
+            from wayland_computer_use_mcp.a11y import close_atspi_pool, global_event_listener
 
             global_event_listener.stop()
+            close_atspi_pool()
         except Exception:
             pass
         self._virtual_env.stop()
@@ -426,4 +427,16 @@ class PortalSession:
             _terminate_proc_group(self._virtual_proc)
             self._virtual_proc = None
         self._initialized = False
+
+    def close_virtual_if_idle(self) -> bool:
+        """Tears down the isolated virtual window when no managed apps remain."""
+        cfg = get_config()
+        if cfg.display_mode != "virtual" and not self._virtual_env.is_running:
+            return False
+        self._stop_session_resources()
+        return True
+
+    def close(self) -> None:
+        """Cleans up active screencast pipeline, remote desktop, libei, and event listeners."""
+        self._stop_session_resources()
         self._async_thread.stop()

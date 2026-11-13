@@ -787,3 +787,61 @@ def test_virtual_session_manager_isolates_and_restores_env(monkeypatch, tmp_path
 
 async def _raise_mock_error():
     raise RuntimeError("no dbus in unit test")
+
+
+def test_cleanup_stale_virtual_dirs_prunes_dead_owner(monkeypatch, tmp_path):
+    """Stale virtual runtime directories whose owner PID exited should be cleaned up."""
+    import os
+
+    from wayland_computer_use_mcp.portal.virtual import cleanup_stale_virtual_dirs
+
+    stale_dir = tmp_path / "wayland_mcp_virtual_dead"
+    stale_dir.mkdir()
+    (stale_dir / ".mcp_pid").write_text("999999", encoding="utf-8")
+
+    live_dir = tmp_path / "wayland_mcp_virtual_live"
+    live_dir.mkdir()
+    (live_dir / ".mcp_pid").write_text(str(os.getpid()), encoding="utf-8")
+
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+
+    def fake_kill(pid, sig):
+        if pid == 999999 and sig == 0:
+            raise ProcessLookupError()
+
+    monkeypatch.setattr("os.kill", fake_kill)
+
+    cleanup_stale_virtual_dirs()
+    assert not stale_dir.exists()
+    assert live_dir.exists()
+
+
+def test_terminate_app_closes_idle_virtual_session(monkeypatch):
+    """terminate_app tears down virtual window when no managed apps remain."""
+    from wayland_computer_use_mcp.portal import global_portal_session
+    from wayland_computer_use_mcp.tools.process_tools import terminate_app
+
+    closed_calls = []
+    remaining_apps = [[{"pid": 222}], []]
+
+    monkeypatch.setattr("wayland_computer_use_mcp.tools.process_tools.terminate", lambda pid: True)
+    monkeypatch.setattr(
+        "wayland_computer_use_mcp.tools.process_tools.list_active_processes",
+        lambda: remaining_apps.pop(0),
+    )
+    monkeypatch.setattr(
+        global_portal_session,
+        "close_virtual_if_idle",
+        lambda: closed_calls.append(True) or True,
+    )
+
+    global_portal_session.target_pid = 111
+    res1 = terminate_app(pid=111)
+    assert res1["virtual_session_closed"] is False
+    assert global_portal_session.target_pid == 222
+    assert closed_calls == []
+
+    res2 = terminate_app(pid=222)
+    assert res2["virtual_session_closed"] is True
+    assert global_portal_session.target_pid is None
+    assert len(closed_calls) == 1
