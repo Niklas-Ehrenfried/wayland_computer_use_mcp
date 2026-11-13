@@ -12,12 +12,12 @@ from wayland_computer_use_mcp.server import (
     clipboard_write,
     double_click,
     hover,
+    inspect_ui_tree,
+    interact_with_node,
     key_combination,
     right_click,
-    take_labeled_screenshot,
 )
-from wayland_computer_use_mcp.tools.navigation_tools import click_element_by_label
-from wayland_computer_use_mcp.tools.visual_tools import focus_window, get_window_geometry
+from wayland_computer_use_mcp.tools.visual_tools import focus_window
 
 
 def test_system_shortcuts_strictly_blocked():
@@ -128,26 +128,21 @@ def test_new_tools_execution(monkeypatch):
     kc_res = key_combination(["ctrl", "c"])
     assert "Dispatched key combination" in kc_res
 
-    # Test click element by label (uses synthetic tree if offline)
-    el_res = click_element_by_label("Click Me!")
-    assert "Clicked left" in el_res
+    # Test interact_with_node (uses synthetic tree if offline)
+    el_res = interact_with_node(target="Click Me!", action="click")
+    assert "Clicked" in str(el_res) or "node action" in str(el_res).lower()
 
-    # Test labeled screenshot (Set-of-Marks)
-    labeled = take_labeled_screenshot()
-    assert "image" in labeled
-    assert "elements" in labeled
-    assert labeled["element_count"] > 0
+    # Test UI tree inspection (uses synthetic tree if offline)
+    tree = inspect_ui_tree(pid=123)
+    assert "interactive_elements" in tree
+    assert len(tree["interactive_elements"]) > 0
 
     # Test clipboard tools
     w_res = clipboard_write("MCP Test Clipboard")
     assert "Copied" in w_res or "clipboard" in w_res
     _ = clipboard_read()
 
-    # Test window geometry and focus
-    geom = get_window_geometry(pid=123)
-    assert "bounds" in geom
-    assert "width" in geom
-
+    # Test window focus
     foc = focus_window(pid=123)
     assert foc["pid"] == 123
 

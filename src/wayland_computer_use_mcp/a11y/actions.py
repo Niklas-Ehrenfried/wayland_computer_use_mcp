@@ -2,33 +2,16 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
-from typing import Any
 
 from dbus_fast import Message, MessageType, Variant
 
 from wayland_computer_use_mcp.a11y.client import AtspiInspector
+from wayland_computer_use_mcp.a11y.client import run_atspi_sync as _run_async_sync
 from wayland_computer_use_mcp.a11y.tree import get_application_tree, get_cached_node
 
 logger = logging.getLogger(__name__)
-
-
-def _run_async_sync(coro_fn: Any, *args: Any, **kwargs: Any) -> Any:
-    """Safely executes an async function synchronously from either sync or async threads."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    if loop and loop.is_running():
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            return ex.submit(asyncio.run, coro_fn(*args, **kwargs)).result()
-    else:
-        return asyncio.run(coro_fn(*args, **kwargs))
 
 
 async def perform_accessible_action(bus_name: str, path: str, action_index: int = 0) -> bool:
@@ -314,6 +297,51 @@ def do_accessible_text_action(
         return False
 
 
+def _prepare_pointer_target(pid: int, target_x: int, target_y: int) -> tuple[int, int]:
+    """Focuses window and auto-scrolls element into viewport ONLY for Level 2 pointer actions."""
+    from wayland_computer_use_mcp.portal import global_portal_session
+    from wayland_computer_use_mcp.security import global_clamper
+
+    if pid > 0 and not global_portal_session.is_mock:
+        try:
+            from wayland_computer_use_mcp.tools.visual_tools import focus_window
+
+            focus_window(pid)
+        except Exception:
+            pass
+
+    w, h = global_clamper.dimensions
+    if w > 0 and h > 0:
+        if target_y > h - 40:
+            scroll_dy = target_y - (h // 2)
+            try:
+                global_portal_session.dispatch_hover(
+                    max(1, min(target_x, w - 1)), h // 2, duration_ms=0
+                )
+                time.sleep(0.01)
+                global_portal_session.dispatch_scroll(0, scroll_dy)
+                time.sleep(0.08)
+                target_y = max(40, min(target_y - scroll_dy, h - 40))
+            except Exception as exc:
+                logger.debug("Auto-scroll failed: %s", exc)
+        elif target_y < 40:
+            scroll_dy = (h // 2) - target_y
+            try:
+                global_portal_session.dispatch_hover(
+                    max(1, min(target_x, w - 1)), h // 2, duration_ms=0
+                )
+                time.sleep(0.01)
+                global_portal_session.dispatch_scroll(0, -scroll_dy)
+                time.sleep(0.08)
+                target_y = max(40, min(target_y + scroll_dy, h - 40))
+            except Exception as exc:
+                logger.debug("Auto-scroll failed: %s", exc)
+
+    cx = max(1, min(target_x, w - 1)) if w > 0 else target_x
+    cy = max(1, min(target_y, h - 1)) if h > 0 else target_y
+    return cx, cy
+
+
 def invoke_node_action(
     pid: int,
     node_id: str,
@@ -325,9 +353,10 @@ def invoke_node_action(
 ) -> str:
     """Interacts with an accessible widget by its compact 1D node ID.
 
-    1. Level 1: Direct programmatic execution via AT-SPI (DoAction, EditableText,
-       Value, Text) with Semantic Parent Bubbling for static labels/icons.
-    2. Level 2: If AT-SPI fails, falls back to coordinate and keyboard input.
+    1. Level 1: Silent programmatic execution via AT-SPI (DoAction, EditableText,
+       Value, Text) with Semantic Parent Bubbling — does not move the mouse cursor.
+    2. Level 2: Only if AT-SPI fails (or a pointer action is requested), focuses window,
+       scrolls into view if needed, and falls back to coordinate/keyboard input.
     """
     cached = get_cached_node(pid, node_id)
     if not cached:
@@ -346,36 +375,6 @@ def invoke_node_action(
     bounds = cached.get("bounds", [0, 0, 0, 0])
 
     from wayland_computer_use_mcp.portal import global_portal_session
-    from wayland_computer_use_mcp.security import global_clamper
-    from wayland_computer_use_mcp.tools.input_tools import click, hover, scroll
-
-    w, h = global_clamper.dimensions
-    if w > 0 and h > 0:
-        # In-built auto-scroll: if element is outside or at edge of visible viewport,
-        # scroll the container so it enters the viewport and becomes reachable.
-        if target_y > h - 40:
-            scroll_dy = target_y - (h // 2)
-            try:
-                hover(max(1, min(target_x, w - 1)), h // 2, pid=pid)
-                time.sleep(0.05)
-                scroll(0, scroll_dy, pid=pid)
-                time.sleep(0.2)
-                target_y = max(40, min(target_y - scroll_dy, h - 40))
-            except Exception as exc:
-                logger.debug("Auto-scroll failed: %s", exc)
-        elif target_y < 40:
-            scroll_dy = (h // 2) - target_y
-            try:
-                hover(max(1, min(target_x, w - 1)), h // 2, pid=pid)
-                time.sleep(0.05)
-                scroll(0, -scroll_dy, pid=pid)
-                time.sleep(0.2)
-                target_y = max(40, min(target_y + scroll_dy, h - 40))
-            except Exception as exc:
-                logger.debug("Auto-scroll failed: %s", exc)
-
-    cx = max(1, min(target_x, w - 1)) if w > 0 else target_x
-    cy = max(1, min(target_y, h - 1)) if h > 0 else target_y
 
     bus_name = cached.get("bus_name")
     path = cached.get("path")
@@ -489,7 +488,8 @@ def invoke_node_action(
                                         exc,
                                     )
 
-        click_msg = click(cx, cy, button="left", pid=pid)
+        cx, cy = _prepare_pointer_target(pid, target_x, target_y)
+        click_msg = global_portal_session.dispatch_click(cx, cy, button="left")
         return f"{click_msg} (Fallback Level 2 for {node_id} '{name}' [{role}])"
 
     elif act == "type":
@@ -506,6 +506,7 @@ def invoke_node_action(
         if level1_success:
             return f"Set text '{text}' on {node_id} ('{name}' [{role}]) via AT-SPI EditableText."
 
+        cx, cy = _prepare_pointer_target(pid, target_x, target_y)
         type_msg = global_portal_session.dispatch_type_text(text, x=cx, y=cy)
         return f"{type_msg} (Fallback Level 2 for {node_id} '{name}' [{role}])"
 
@@ -521,10 +522,11 @@ def invoke_node_action(
         if level1_success:
             return f"Cleared text in {node_id} ('{name}' [{role}]) via AT-SPI EditableText."
 
+        cx, cy = _prepare_pointer_target(pid, target_x, target_y)
         global_portal_session.dispatch_click(cx, cy, button="left")
-        time.sleep(0.05)
+        time.sleep(0.015)
         global_portal_session.dispatch_key_combination(["ctrl", "a"])
-        time.sleep(0.02)
+        time.sleep(0.01)
         global_portal_session.dispatch_key_combination(["BackSpace"])
         return f"Cleared text in {node_id} via Ctrl+A + BackSpace fallback."
 
@@ -536,8 +538,9 @@ def invoke_node_action(
         if level1_success:
             return f"Selected all text in {node_id} ('{name}' [{role}]) via AT-SPI Text."
 
+        cx, cy = _prepare_pointer_target(pid, target_x, target_y)
         global_portal_session.dispatch_click(cx, cy, button="left")
-        time.sleep(0.05)
+        time.sleep(0.015)
         global_portal_session.dispatch_key_combination(["ctrl", "a"])
         return f"Selected all text in {node_id} via Ctrl+A fallback."
 
@@ -563,8 +566,9 @@ def invoke_node_action(
         if level1_success:
             return f"Copied text from {node_id} ('{name}' [{role}]) via AT-SPI EditableText."
 
+        cx, cy = _prepare_pointer_target(pid, target_x, target_y)
         global_portal_session.dispatch_click(cx, cy, button="left")
-        time.sleep(0.05)
+        time.sleep(0.015)
         global_portal_session.dispatch_key_combination(["ctrl", "c"])
         return f"Copied text from {node_id} via Ctrl+C fallback."
 
@@ -578,8 +582,9 @@ def invoke_node_action(
         if level1_success:
             return f"Pasted text into {node_id} ('{name}' [{role}]) via AT-SPI EditableText."
 
+        cx, cy = _prepare_pointer_target(pid, target_x, target_y)
         global_portal_session.dispatch_click(cx, cy, button="left")
-        time.sleep(0.05)
+        time.sleep(0.015)
         global_portal_session.dispatch_key_combination(["ctrl", "v"])
         return f"Pasted text into {node_id} via Ctrl+V fallback."
 
@@ -593,12 +598,14 @@ def invoke_node_action(
         if level1_success:
             return f"Cut text from {node_id} ('{name}' [{role}]) via AT-SPI EditableText."
 
+        cx, cy = _prepare_pointer_target(pid, target_x, target_y)
         global_portal_session.dispatch_click(cx, cy, button="left")
-        time.sleep(0.05)
+        time.sleep(0.015)
         global_portal_session.dispatch_key_combination(["ctrl", "x"])
         return f"Cut text from {node_id} via Ctrl+X fallback."
 
     elif act == "drag_select":
+        cx, cy = _prepare_pointer_target(pid, target_x, target_y)
         if len(bounds) == 4 and bounds[2] > 10:
             start_x = bounds[0] + 6
             end_x = bounds[0] + bounds[2] - 6
@@ -627,6 +634,7 @@ def invoke_node_action(
             return f"Set value {val_to_set} on {node_id} ('{name}' [{role}]) via AT-SPI Value."
 
         # Fallback Level 2 for slider: interpolate drag across bounds
+        _prepare_pointer_target(pid, target_x, target_y)
         if len(bounds) == 4 and bounds[2] > 0:
             sy = bounds[1] + bounds[3] // 2
             sx = bounds[0] + 4
@@ -636,10 +644,13 @@ def invoke_node_action(
         return f"Failed to set value on {node_id}."
 
     elif act == "double_click":
+        cx, cy = _prepare_pointer_target(pid, target_x, target_y)
         return global_portal_session.dispatch_double_click(cx, cy)
     elif act == "right_click":
+        cx, cy = _prepare_pointer_target(pid, target_x, target_y)
         return global_portal_session.dispatch_right_click(cx, cy)
     elif act == "hover":
+        cx, cy = _prepare_pointer_target(pid, target_x, target_y)
         return global_portal_session.dispatch_hover(cx, cy)
     else:
         raise ValueError(

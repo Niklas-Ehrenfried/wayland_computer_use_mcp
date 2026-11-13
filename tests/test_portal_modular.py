@@ -179,12 +179,6 @@ def test_portal_session_mock_mode():
     assert isinstance(frame, Image.Image)
     assert frame.size == (1920, 1080)
 
-    # Test Set-of-Marks labeled screenshot
-    labeled, elements = session.generate_labeled_screenshot()
-    assert isinstance(labeled, Image.Image)
-    assert isinstance(elements, list)
-    assert len(elements) > 0
-
 
 def test_async_loop_thread():
     """Verifies AsyncLoopThread executes coroutines and returns results."""

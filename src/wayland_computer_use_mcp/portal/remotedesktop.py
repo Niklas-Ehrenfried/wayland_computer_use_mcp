@@ -14,20 +14,22 @@ from typing import Any
 from dbus_fast import Message, MessageType
 from dbus_fast.aio import MessageBus
 
+from wayland_computer_use_mcp.config import get_config
 from wayland_computer_use_mcp.libei import EIClient
 from wayland_computer_use_mcp.security import global_token_store
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SAVE_DIR = "/home/niklas/.gemini/antigravity/brain/539f5e12-8178-4a5e-b7b9-b96af1210fa6"
-
 
 def _debug_log(msg: str) -> None:
-    logger.info(msg)
-    save_dir_env = os.environ.get("WAYLAND_MCP_SAVE_FRAMES_DIR") or DEFAULT_SAVE_DIR
-    if save_dir_env:
+    logger.debug(msg)
+    debug_log_env = os.environ.get("WAYLAND_MCP_DEBUG_LOG")
+    save_dir_env = os.environ.get("WAYLAND_MCP_SAVE_FRAMES_DIR")
+    log_dir = debug_log_env or save_dir_env
+    if log_dir:
         try:
-            p = Path(save_dir_env) / "portal_debug.log"
+            p = Path(log_dir) / "portal_debug.log"
+            p.parent.mkdir(parents=True, exist_ok=True)
             with open(p, "a", encoding="utf-8") as f:
                 f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
         except Exception:
@@ -38,6 +40,7 @@ class AsyncLoopThread:
     """Dedicated thread running an asyncio event loop for persistent D-Bus connections."""
 
     def __init__(self) -> None:
+        self._lock = threading.Lock()
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self._run_loop, name="PortalAsyncLoop", daemon=True)
         self.thread.start()
@@ -46,9 +49,28 @@ class AsyncLoopThread:
         asyncio.set_event_loop(self.loop)
         self.loop.run_forever()
 
+    def _ensure_running(self) -> None:
+        with self._lock:
+            if not self.thread.is_alive() or self.loop.is_closed():
+                self.loop = asyncio.new_event_loop()
+                self.thread = threading.Thread(
+                    target=self._run_loop, name="PortalAsyncLoop", daemon=True
+                )
+                self.thread.start()
+
     def run(self, coro: Any, timeout: float = 120.0) -> Any:
+        self._ensure_running()
         fut = asyncio.run_coroutine_threadsafe(coro, self.loop)
         return fut.result(timeout=timeout)
+
+    def stop(self) -> None:
+        with self._lock:
+            if self.loop.is_running():
+                self.loop.call_soon_threadsafe(self.loop.stop)
+            if self.thread.is_alive():
+                self.thread.join(timeout=2.0)
+            if not self.loop.is_running() and not self.loop.is_closed():
+                self.loop.close()
 
 
 class RemoteDesktopClient:
@@ -65,6 +87,10 @@ class RemoteDesktopClient:
         self.eis_fd: int | None = None
         self.ei_client: EIClient | None = None
         self.restore_token: str | None = None
+        self.clipboard_enabled: bool = False
+        self._clipboard_text: str = ""
+        self._oeffis_lib: Any = None
+        self._oeffis_ctx: Any = None
 
     async def negotiate(self, active_app_id: str) -> tuple[str, int | None, str | None, EIClient]:
         """Perform XDG portal session handshake via dbus-fast.
@@ -74,7 +100,7 @@ class RemoteDesktopClient:
         from dbus_fast import BusType, Variant
 
         _debug_log("Starting portal D-Bus negotiation...")
-        self.bus = await MessageBus(bus_type=BusType.SESSION).connect()
+        self.bus = await MessageBus(bus_type=BusType.SESSION, negotiate_unix_fd=True).connect()
         bus = self.bus
         sender_id = bus.unique_name[1:].replace(".", "_")
 
@@ -173,8 +199,9 @@ class RemoteDesktopClient:
         stored_token = global_token_store.get_token(active_app_id)
         screencast_opts: dict[str, Any] = {
             "handle_token": Variant("s", f"r_sc_sel_{ts}"),
-            "types": Variant("u", 1),  # MONITOR
+            "types": Variant("u", int(get_config().source_type)),
             "multiple": Variant("b", False),
+            "persist_mode": Variant("u", 2),
         }
         if stored_token:
             screencast_opts["restore_token"] = Variant("s", stored_token)
@@ -202,6 +229,26 @@ class RemoteDesktopClient:
             ],
             f"r_rd_sel_{ts}",
         )
+
+        # 3b. Opt into XDG Portal Clipboard (xdg-desktop-portal >= 1.18) if supported
+        self.clipboard_enabled = False
+        try:
+            cb_reply = await bus.call(
+                Message(
+                    destination=self.PORTAL_BUS,
+                    path=self.PORTAL_PATH,
+                    interface="org.freedesktop.portal.Clipboard",
+                    member="RequestClipboard",
+                    signature="oa{sv}",
+                    body=[self.session_handle, {}],
+                )
+            )
+            if cb_reply and cb_reply.message_type != MessageType.ERROR:
+                self.clipboard_enabled = True
+                bus.add_message_handler(self._on_clipboard_signal)
+                _debug_log("org.freedesktop.portal.Clipboard enabled on portal session")
+        except Exception as exc:
+            _debug_log(f"Portal Clipboard unavailable (non-fatal): {exc}")
 
         # 4. Start session
         start_results = await call_portal_action(
@@ -231,44 +278,71 @@ class RemoteDesktopClient:
             self.restore_token = str(new_restore_token)
             global_token_store.set_token(active_app_id, self.restore_token)
 
-        # 5. Connect to EIS for input injection on user's seat (seat0)
-        _debug_log("Connecting to EIS for input injection on user's seat...")
-        oeffis_fd = self.connect_eis_via_oeffis()
-        if oeffis_fd is not None and oeffis_fd >= 0:
-            self.eis_fd = oeffis_fd
-            self.ei_client = EIClient(fd=self.eis_fd)
-            _debug_log(
-                f"EIS connected fd={self.eis_fd} via liboeffis (primary seat), "
-                f"pointer={self.ei_client.pointer_device is not None}, "
-                f"keyboard={self.ei_client.keyboard_device is not None}"
+        # 5. Connect to EIS for input injection on the already-authorized session
+        _debug_log("Connecting to EIS via D-Bus RemoteDesktop.ConnectToEIS...")
+        connected_via_dbus = False
+        try:
+            eis_reply = await asyncio.wait_for(
+                bus.call(
+                    Message(
+                        destination=self.PORTAL_BUS,
+                        path=self.PORTAL_PATH,
+                        interface="org.freedesktop.portal.RemoteDesktop",
+                        member="ConnectToEIS",
+                        signature="oa{sv}",
+                        body=[self.session_handle, {}],
+                    )
+                ),
+                timeout=3.0,
             )
-        else:
-            _debug_log("liboeffis unavailable; attempting D-Bus ConnectToEIS fallback...")
-            try:
-                eis_reply = await asyncio.wait_for(
-                    bus.call(
-                        Message(
-                            destination=self.PORTAL_BUS,
-                            path=self.PORTAL_PATH,
-                            interface="org.freedesktop.portal.RemoteDesktop",
-                            member="ConnectToEIS",
-                            signature="oa{sv}",
-                            body=[self.session_handle, {}],
-                        )
-                    ),
-                    timeout=2.0,
+            if eis_reply.message_type != MessageType.ERROR and eis_reply.unix_fds:
+                self.eis_fd = eis_reply.unix_fds[0]
+                self.ei_client = EIClient(fd=self.eis_fd)
+                connected_via_dbus = True
+                _debug_log(f"Connected to EIS fd={self.eis_fd} via D-Bus ConnectToEIS")
+        except Exception as exc:
+            _debug_log(f"ConnectToEIS failed: {exc}")
+
+        if not connected_via_dbus:
+            _debug_log("ConnectToEIS unavailable; trying liboeffis fallback...")
+            oeffis_fd = self.connect_eis_via_oeffis()
+            if oeffis_fd is not None and oeffis_fd >= 0:
+                self.eis_fd = oeffis_fd
+                self.ei_client = EIClient(fd=self.eis_fd)
+                _debug_log(
+                    f"EIS connected fd={self.eis_fd} via liboeffis, "
+                    f"pointer={self.ei_client.pointer_device is not None}, "
+                    f"keyboard={self.ei_client.keyboard_device is not None}"
                 )
-                if eis_reply.message_type != MessageType.ERROR and eis_reply.unix_fds:
-                    self.eis_fd = eis_reply.unix_fds[0]
-                    self.ei_client = EIClient(fd=self.eis_fd)
-                    _debug_log(f"Connected to EIS fd={self.eis_fd} via D-Bus")
-                else:
-                    self.ei_client = EIClient(fd=None)
-            except Exception as exc:
-                _debug_log(f"ConnectToEIS fallback finished: {exc}")
+            else:
                 self.ei_client = EIClient(fd=None)
 
         return self.session_handle, self.pipewire_node_id, self.restore_token, self.ei_client
+
+    def close(self) -> None:
+        """Closes EIS client, releases liboeffis context, and disconnects portal D-Bus."""
+        if self.ei_client is not None:
+            try:
+                self.ei_client.close()
+            except Exception:
+                pass
+            self.ei_client = None
+        if self._oeffis_lib is not None and self._oeffis_ctx is not None:
+            try:
+                self._oeffis_lib.oeffis_unref(self._oeffis_ctx)
+            except Exception:
+                pass
+            self._oeffis_ctx = None
+            self._oeffis_lib = None
+        if self.bus is not None:
+            try:
+                self.bus.disconnect()
+            except Exception:
+                pass
+            self.bus = None
+        self.session_handle = None
+        self.pipewire_node_id = None
+        self.eis_fd = None
 
     def connect_eis_via_oeffis(self) -> int | None:
         """Connects to EIS via system liboeffis to get an input injection fd."""
@@ -313,6 +387,8 @@ class RemoteDesktopClient:
                 fd = c.oeffis_get_eis_fd(ctx)
                 if fd >= 0:
                     _debug_log(f"liboeffis connected: eis_fd={fd}")
+                    self._oeffis_lib = c
+                    self._oeffis_ctx = ctx
                     return fd
                 err = c.oeffis_get_error_message(ctx)
                 if err:
@@ -442,3 +518,124 @@ class RemoteDesktopClient:
                 )
             )
         )
+
+    def _on_clipboard_signal(self, msg: Message) -> None:
+        """Handles org.freedesktop.portal.Clipboard SelectionTransfer signals."""
+        if (
+            msg.interface != "org.freedesktop.portal.Clipboard"
+            or msg.member != "SelectionTransfer"
+            or not self.bus
+            or not self.session_handle
+        ):
+            return
+        if len(msg.body) < 3 or msg.body[0] != self.session_handle:
+            return
+        serial = int(msg.body[2])
+        payload = self._clipboard_text.encode("utf-8")
+        asyncio.create_task(self._fulfill_selection_write(serial, payload))
+
+    async def _fulfill_selection_write(self, serial: int, payload: bytes) -> None:
+        if not self.bus or not self.session_handle:
+            return
+        ok = False
+        try:
+            reply = await self.bus.call(
+                Message(
+                    destination=self.PORTAL_BUS,
+                    path=self.PORTAL_PATH,
+                    interface="org.freedesktop.portal.Clipboard",
+                    member="SelectionWrite",
+                    signature="ou",
+                    body=[self.session_handle, serial],
+                )
+            )
+            if reply and reply.message_type != MessageType.ERROR and reply.unix_fds:
+                fd = reply.unix_fds[0]
+                try:
+                    os.write(fd, payload)
+                    ok = True
+                finally:
+                    os.close(fd)
+        except Exception as exc:
+            _debug_log(f"SelectionWrite failed: {exc}")
+        try:
+            await self.bus.call(
+                Message(
+                    destination=self.PORTAL_BUS,
+                    path=self.PORTAL_PATH,
+                    interface="org.freedesktop.portal.Clipboard",
+                    member="SelectionWriteDone",
+                    signature="oub",
+                    body=[self.session_handle, serial, ok],
+                )
+            )
+        except Exception:
+            pass
+
+    def write_clipboard_text(self, text: str) -> bool:
+        """Sets clipboard text via org.freedesktop.portal.Clipboard (zero CLI deps)."""
+        if not self.bus or not self.session_handle or not self.clipboard_enabled:
+            return False
+        from dbus_fast import Variant
+
+        self._clipboard_text = text
+        try:
+            reply = self._async_thread.run(
+                self.bus.call(
+                    Message(
+                        destination=self.PORTAL_BUS,
+                        path=self.PORTAL_PATH,
+                        interface="org.freedesktop.portal.Clipboard",
+                        member="SetSelection",
+                        signature="oa{sv}",
+                        body=[
+                            self.session_handle,
+                            {
+                                "mime_types": Variant(
+                                    "as", ["text/plain;charset=utf-8", "text/plain"]
+                                )
+                            },
+                        ],
+                    )
+                ),
+                timeout=2.0,
+            )
+            return bool(reply and reply.message_type != MessageType.ERROR)
+        except Exception as exc:
+            _debug_log(f"Portal SetSelection failed: {exc}")
+            return False
+
+    def read_clipboard_text(self) -> str | None:
+        """Reads clipboard text via org.freedesktop.portal.Clipboard."""
+        if not self.bus or not self.session_handle or not self.clipboard_enabled:
+            return None
+        for mime in ("text/plain;charset=utf-8", "text/plain"):
+            try:
+                reply = self._async_thread.run(
+                    self.bus.call(
+                        Message(
+                            destination=self.PORTAL_BUS,
+                            path=self.PORTAL_PATH,
+                            interface="org.freedesktop.portal.Clipboard",
+                            member="SelectionRead",
+                            signature="os",
+                            body=[self.session_handle, mime],
+                        )
+                    ),
+                    timeout=2.0,
+                )
+                if reply and reply.message_type != MessageType.ERROR and reply.unix_fds:
+                    fd = reply.unix_fds[0]
+                    try:
+                        chunks = []
+                        while True:
+                            data = os.read(fd, 65536)
+                            if not data:
+                                break
+                            chunks.append(data)
+                        return b"".join(chunks).decode("utf-8", errors="replace")
+                    finally:
+                        os.close(fd)
+            except Exception as exc:
+                _debug_log(f"Portal SelectionRead({mime}) failed: {exc}")
+        return None

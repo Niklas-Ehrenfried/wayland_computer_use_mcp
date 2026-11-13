@@ -16,6 +16,7 @@ import time
 
 import pytest
 
+from wayland_computer_use_mcp.process import is_responsive
 from wayland_computer_use_mcp.server import (
     batch_actions,
     capture_window_frame,
@@ -28,7 +29,6 @@ from wayland_computer_use_mcp.server import (
     scroll,
     terminate_app,
 )
-from wayland_computer_use_mcp.tools.process_tools import check_app_liveness
 
 pytestmark = pytest.mark.live
 
@@ -53,8 +53,7 @@ def live_app():
 def test_01_launch_and_liveness(live_app: int):
     """Verifies that the application launches, stays responsive, and generates logs."""
     pid = live_app
-    liveness = check_app_liveness(pid)
-    assert liveness["responsive"] is True
+    assert is_responsive(pid) is True
 
     tree = inspect_ui_tree(pid=pid, max_depth=10)
     assert "interactive_elements" in tree

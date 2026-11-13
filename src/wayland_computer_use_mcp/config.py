@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
+
+DEFAULT_VIRTUAL_CMD = "weston --backend=headless-backend.so"
 
 CONFIG_DIR = Path.home() / ".config" / "wayland-computer-use-mcp"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -27,7 +30,10 @@ class Config:
     source_type: int = 2
 
     # Command to spawn a virtual Wayland compositor when in "virtual" mode
-    virtual_compositor_cmd: str = "weston --backend=headless-backend.so"
+    virtual_compositor_cmd: str = DEFAULT_VIRTUAL_CMD
+
+    # When True in "virtual" mode, opens a visible Playwright-style nested compositor window
+    virtual_headed: bool = False
 
     # Virtual display name when spawned
     virtual_wayland_display: str = "wayland-mcp-virtual"
@@ -38,8 +44,11 @@ class Config:
     # Mock mode for testing without real Wayland/D-Bus portal
     mock_mode: bool = False
 
-    # Observable pause after visual mouse/keyboard actions (seconds)
-    action_delay_seconds: float = 0.1
+    # Opt-in flag to expose install_to_desktop / uninstall_from_desktop MCP tools
+    enable_desktop_installer: bool = False
+
+    # Optional extra pause after physical mouse/keyboard actions (seconds)
+    action_delay_seconds: float = 0.0
 
     @classmethod
     def load(cls) -> Config:
@@ -62,6 +71,8 @@ class Config:
                         config.token_cache_dir = Path(data["token_cache_dir"])
                     if "mock_mode" in data:
                         config.mock_mode = bool(data["mock_mode"])
+                    if "enable_desktop_installer" in data:
+                        config.enable_desktop_installer = bool(data["enable_desktop_installer"])
             except Exception:
                 pass
 
@@ -92,8 +103,23 @@ class Config:
         if "WAYLAND_MCP_VIRTUAL_CMD" in os.environ:
             config.virtual_compositor_cmd = os.environ["WAYLAND_MCP_VIRTUAL_CMD"]
 
+        if os.environ.get("WAYLAND_MCP_VIRTUAL_HEADED", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            config.display_mode = "virtual"
+            config.virtual_headed = True
+
         if os.environ.get("WAYLAND_MCP_MOCK", "").strip().lower() in ("1", "true", "yes"):
             config.mock_mode = True
+
+        if os.environ.get("WAYLAND_MCP_ENABLE_DESKTOP_INSTALLER", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            config.enable_desktop_installer = True
 
         if "WAYLAND_MCP_ACTION_DELAY" in os.environ:
             try:
@@ -132,6 +158,9 @@ class Config:
                     self.display_mode = mode  # type: ignore
             elif arg == "--virtual":
                 self.display_mode = "virtual"
+            elif arg in ("--virtual-window", "--isolated-window"):
+                self.display_mode = "virtual"
+                self.virtual_headed = True
             elif arg == "--live":
                 self.display_mode = "live"
             elif arg.startswith("--access="):
@@ -150,6 +179,8 @@ class Config:
                 self.source_type = 3
             elif arg == "--mock":
                 self.mock_mode = True
+            elif arg == "--enable-desktop-installer":
+                self.enable_desktop_installer = True
             else:
                 remaining.append(arg)
         return remaining
@@ -172,21 +203,66 @@ Usage:
 
 Options:
   --live                      Run in active Wayland user desktop session (default).
-  --virtual                   Run in an isolated virtual Wayland compositor session.
+  --virtual                   Run in a headless virtual Wayland compositor session.
+  --virtual-window            Open a visible Playwright-style isolated compositor window.
   --display-mode=MODE         Set display mode ('live' or 'virtual').
   --window-only               Clamp capture and input to active application window (default).
   --fullscreen, --monitor     Allow full desktop/screen capture and interaction.
   --allow-all                 Allow either window or display capture.
   --access=ACCESS             Set access mode ('window', 'fullscreen', or 'both').
+  --enable-desktop-installer  Expose install_to_desktop / uninstall_from_desktop tools.
   --mock                      Run in headless mock mode for testing/CI.
   -h, --help                  Show this help message and exit.
   -v, --version               Show version and exit.
 
 Environment Variables:
-  WAYLAND_MCP_DISPLAY_MODE    'live' or 'virtual'
-  WAYLAND_MCP_ACCESS_MODE     'window', 'fullscreen', or 'both'
-  WAYLAND_MCP_SAVE_FRAMES_DIR Directory to persist artifacts when save_artifact=True
+  WAYLAND_MCP_DISPLAY_MODE             'live' or 'virtual'
+  WAYLAND_MCP_VIRTUAL_HEADED           Set '1' for visible nested compositor window
+  WAYLAND_MCP_ACCESS_MODE              'window', 'fullscreen', or 'both'
+  WAYLAND_MCP_PROJECT_DIR              Override project root for .agents/artifacts/
+  WAYLAND_MCP_SAVE_FRAMES_DIR          Directory to persist screenshots
+  WAYLAND_MCP_ENABLE_DESKTOP_INSTALLER Set '1' to enable desktop shortcut tools
 """
+
+
+def detect_virtual_compositor_cmd(
+    *,
+    headed: bool,
+    socket_name: str,
+    width: int = 1280,
+    height: int = 800,
+    explicit_cmd: str = DEFAULT_VIRTUAL_CMD,
+) -> str:
+    """Resolves a cross-DE Wayland nested/headless compositor command.
+
+    Prefers compositor-agnostic ``weston`` first so visible Playwright-style
+    isolated windows work across KDE, GNOME, Sway, and Hyprland alike.
+    """
+    if explicit_cmd and explicit_cmd != DEFAULT_VIRTUAL_CMD:
+        return explicit_cmd
+
+    if headed:
+        if shutil.which("weston"):
+            return f"weston --socket={socket_name} --width={width} --height={height}"
+        if shutil.which("kwin_wayland"):
+            return (
+                f"kwin_wayland --xwayland --width {width} --height {height} --socket {socket_name}"
+            )
+        if shutil.which("sway"):
+            return "sway"
+        return f"weston --socket={socket_name} --width={width} --height={height}"
+
+    if shutil.which("weston"):
+        return (
+            f"weston --backend=headless-backend.so --socket={socket_name} "
+            f"--width={width} --height={height}"
+        )
+    if shutil.which("kwin_wayland"):
+        return (
+            f"kwin_wayland --virtual --socket {socket_name} "
+            f"--no-lockscreen --no-global-shortcuts --width {width} --height {height}"
+        )
+    return explicit_cmd
 
 
 _active_config: Config | None = None

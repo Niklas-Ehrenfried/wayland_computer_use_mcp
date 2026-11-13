@@ -6,10 +6,9 @@ and activation for KDE Plasma, GNOME, Hyprland, Sway, and generic Wayland.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from typing import Any
 
+from wayland_computer_use_mcp._async import run_async_sync as _run_async_sync
 from wayland_computer_use_mcp.compositors.base import (
     CompositorBackend,
     DisplayInfo,
@@ -20,6 +19,7 @@ from wayland_computer_use_mcp.compositors.generic import GenericCompositorBacken
 from wayland_computer_use_mcp.compositors.gnome import GnomeBackend
 from wayland_computer_use_mcp.compositors.kwin import KWinBackend
 from wayland_computer_use_mcp.compositors.wlroots import WlrootsBackend
+from wayland_computer_use_mcp.config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,8 @@ _cached_backend: CompositorBackend | None = None
 async def get_compositor_backend() -> CompositorBackend:
     """Auto-detects and returns the active compositor backend."""
     global _cached_backend
+    if get_config().mock_mode:
+        return GenericCompositorBackend()
     if _cached_backend is not None:
         return _cached_backend
 
@@ -56,21 +58,6 @@ def reset_compositor_backend() -> None:
     """Resets the cached compositor backend (useful for tests)."""
     global _cached_backend
     _cached_backend = None
-
-
-def _run_async_sync(coro_fn: Any, *args: Any, **kwargs: Any) -> Any:
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    if loop and loop.is_running():
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            return ex.submit(asyncio.run, coro_fn(*args, **kwargs)).result()
-    else:
-        return asyncio.run(coro_fn(*args, **kwargs))
 
 
 async def _query_geom_async(pid: int | None, title: str | None) -> tuple[int, int, int, int] | None:

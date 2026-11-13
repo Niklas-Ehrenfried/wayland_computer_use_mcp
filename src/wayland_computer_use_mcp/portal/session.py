@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
+import signal
 import subprocess
 import threading
 import time
@@ -11,10 +13,8 @@ from typing import Any
 
 from PIL import Image, ImageDraw
 
-from wayland_computer_use_mcp.artifacts import get_artifacts_dir
 from wayland_computer_use_mcp.config import get_config
 from wayland_computer_use_mcp.libei import EIClient
-from wayland_computer_use_mcp.overlay import draw_labeled_overlay
 from wayland_computer_use_mcp.portal.input import InputDispatcher
 from wayland_computer_use_mcp.portal.remotedesktop import (
     AsyncLoopThread,
@@ -59,6 +59,7 @@ class PortalSession:
         self._initialized = False
         self._is_mock = False
         self._last_portal_error: str | None = None
+        self._virtual_proc: subprocess.Popen[Any] | None = None
 
     @property
     def bus(self) -> Any:
@@ -191,22 +192,44 @@ class PortalSession:
                 ) from exc
 
     def _ensure_virtual_compositor(self) -> None:
-        """Verify or spawn a virtual Wayland compositor when in virtual mode."""
+        """Verify or spawn a cross-DE virtual/nested Wayland compositor when in virtual mode."""
+        from wayland_computer_use_mcp.config import detect_virtual_compositor_cmd
+
+        if self._virtual_proc is not None and self._virtual_proc.poll() is None:
+            return
+
         cfg = get_config()
         current_display = os.environ.get("WAYLAND_DISPLAY")
-        if not current_display or current_display != cfg.virtual_wayland_display:
-            logger.info("Starting virtual compositor: %s", cfg.virtual_compositor_cmd)
-            try:
-                subprocess.Popen(
-                    cfg.virtual_compositor_cmd,
-                    shell=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                time.sleep(1.0)
-                os.environ["WAYLAND_DISPLAY"] = cfg.virtual_wayland_display
-            except Exception as exc:
-                logger.warning("Could not launch virtual compositor: %s", exc)
+        socket_name = cfg.virtual_wayland_display
+        if current_display == socket_name:
+            return
+
+        cmd = detect_virtual_compositor_cmd(
+            headed=cfg.virtual_headed,
+            socket_name=socket_name,
+            explicit_cmd=cfg.virtual_compositor_cmd,
+        )
+        logger.info("Starting virtual compositor (headed=%s): %s", cfg.virtual_headed, cmd)
+        try:
+            argv = shlex.split(cmd)
+            self._virtual_proc = subprocess.Popen(
+                argv,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+            socket_path = os.path.join(runtime_dir, socket_name)
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                if os.path.exists(socket_path):
+                    break
+                if self._virtual_proc.poll() is not None:
+                    break
+                time.sleep(0.05)
+            os.environ["WAYLAND_DISPLAY"] = socket_name
+        except Exception as exc:
+            logger.warning("Could not launch virtual compositor: %s", exc)
 
     def _init_mock_session(self) -> None:
         """Initialize mock session for CI and testing."""
@@ -401,54 +424,45 @@ class PortalSession:
     def dispatch_clipboard_write(self, text: str) -> str:
         return self._input.dispatch_clipboard_write(text)
 
-    def generate_labeled_screenshot(
-        self,
-        pid: int | None = None,
-        save_to_disk: bool = False,
-        filename: str = "latest_labeled.png",
-    ) -> tuple[Image.Image, list[dict[str, Any]]]:
-        """Captures window frame and overlays numbered Set-of-Marks badges for widgets."""
-        self.check_active_app(pid)
-        from wayland_computer_use_mcp.a11y import get_application_tree
-
-        if pid:
-            self.target_pid = pid
-
-        effective_pid = pid or self.target_pid or 0
-        frame = self.capture_frame(save_to_disk=False)
-        tree = get_application_tree(effective_pid)
-
-        # Use comprehensive interactive_elements parsed and cached by flatten_tree
-        elements = [
-            el
-            for el in tree.get("interactive_elements", [])
-            if el.get("bounds")
-            and len(el["bounds"]) == 4
-            and el["bounds"][2] > 0
-            and el["bounds"][3] > 0
-        ]
-
-        root_bounds = tree.get("bounds", [0, 0, 0, 0])
-        final_img, legend = draw_labeled_overlay(frame, elements, root_bounds)
-
-        if save_to_disk:
-            save_dir = get_artifacts_dir("screenshots")
-            try:
-                labeled_path = save_dir / filename
-                final_img.save(labeled_path)
-                self.last_saved_labeled_path = str(labeled_path)
-            except Exception as exc:
-                logger.debug("Failed to save labeled frame: %s", exc)
-
-        return final_img, legend
-
     def close(self) -> None:
-        """Cleans up active screencast pipeline, remote desktop, and libei resources."""
-        if self.screencast_client:
-            self.screencast_client.stop()
-        if self._ei_client:
+        """Cleans up active screencast pipeline, remote desktop, libei, and event listeners."""
+        self._screencast.stop()
+        self._rd_client.close()
+        try:
+            from wayland_computer_use_mcp.a11y import global_event_listener
+
+            global_event_listener.stop()
+        except Exception:
+            pass
+        proc = self._virtual_proc
+        if proc is not None:
+            pgid: int | None = None
+            raw_pid = getattr(proc, "pid", None)
+            if isinstance(proc, subprocess.Popen) and type(raw_pid) is int and raw_pid > 1:
+                try:
+                    candidate = os.getpgid(raw_pid)
+                    own_pgid = os.getpgid(0)
+                    if candidate > 1 and candidate != own_pgid:
+                        pgid = candidate
+                except OSError:
+                    pgid = None
             try:
-                self._ei_client.close()
+                if pgid is not None:
+                    os.killpg(pgid, signal.SIGTERM)
+                else:
+                    proc.terminate()
             except Exception:
                 pass
-            self._ei_client = None
+            try:
+                proc.wait(timeout=1.5)
+            except Exception:
+                try:
+                    if pgid is not None:
+                        os.killpg(pgid, signal.SIGKILL)
+                    else:
+                        proc.kill()
+                except Exception:
+                    pass
+            self._virtual_proc = None
+        self._initialized = False
+        self._async_thread.stop()

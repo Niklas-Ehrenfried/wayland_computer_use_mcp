@@ -6,7 +6,9 @@ import logging
 from typing import Any
 
 from fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
+from wayland_computer_use_mcp.config import get_config
 from wayland_computer_use_mcp.installer import (
     install_desktop_app,
     remove_desktop_app,
@@ -33,8 +35,12 @@ def install_to_desktop(
     icon_path: str | None = None,
     version: str | None = None,
     is_dev: bool | None = None,
+    args: list[str] | None = None,
+    comment: str | None = None,
+    categories: str = "Utility;",
+    terminal: bool = False,
 ) -> dict[str, Any]:
-    """Registers a script as a native Linux desktop application with optional version badging."""
+    """Creates a one-click Linux desktop application shortcut (.desktop) for any app or script."""
     return install_desktop_app(
         app_id=app_id,
         name=name,
@@ -42,6 +48,10 @@ def install_to_desktop(
         icon_path=icon_path,
         version=version,
         is_dev=is_dev,
+        args=args,
+        comment=comment,
+        categories=categories,
+        terminal=terminal,
     )
 
 
@@ -93,10 +103,36 @@ def window_control(action: str, pid: int | None = None) -> dict[str, Any]:
     }
 
 
+def register_desktop_installer_tools(mcp: FastMCP) -> None:
+    """Opt-in registration for install_to_desktop and uninstall_from_desktop."""
+    mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+        )
+    )(install_to_desktop)
+    mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+        )
+    )(uninstall_from_desktop)
+
+
 def register_system_tools(mcp: FastMCP) -> None:
-    """Registers clipboard, desktop integration, and window control tools onto FastMCP."""
-    mcp.tool()(clipboard_read)
-    mcp.tool()(clipboard_write)
-    mcp.tool()(install_to_desktop)
-    mcp.tool()(uninstall_from_desktop)
-    mcp.tool()(window_control)
+    """Registers clipboard, window control, and optional desktop integration tools onto FastMCP."""
+    mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+        )
+    )(clipboard_read)
+    mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+        )
+    )(clipboard_write)
+    mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False
+        )
+    )(window_control)
+    if get_config().enable_desktop_installer:
+        register_desktop_installer_tools(mcp)

@@ -87,13 +87,13 @@ class InputDispatcher:
         if self._has_ei_pointer():
             ei_client = self._get_ei_client()
             ei_client.pointer_motion_absolute(target_x, target_y)
-            time.sleep(0.02)
+            time.sleep(0.005)
             ei_client.button_click(button_code)
         else:
             self.rd_client.notify_pointer_motion_absolute(target_x, target_y)
-            time.sleep(0.02)
+            time.sleep(0.005)
             self.rd_client.notify_pointer_button(button_code, True)
-            time.sleep(0.02)
+            time.sleep(0.008)
             self.rd_client.notify_pointer_button(button_code, False)
 
         self._apply_action_delay()
@@ -119,14 +119,14 @@ class InputDispatcher:
         if self._has_ei_pointer():
             ei_client = self._get_ei_client()
             ei_client.pointer_motion_absolute(target_x, target_y)
-            time.sleep(0.02)
+            time.sleep(0.005)
             ei_client.double_click(button_code)
         else:
             self.rd_client.notify_pointer_motion_absolute(target_x, target_y)
-            time.sleep(0.02)
+            time.sleep(0.005)
             self.rd_client.notify_pointer_button(button_code, True)
             self.rd_client.notify_pointer_button(button_code, False)
-            time.sleep(0.05)
+            time.sleep(0.04)
             self.rd_client.notify_pointer_button(button_code, True)
             self.rd_client.notify_pointer_button(button_code, False)
 
@@ -137,7 +137,7 @@ class InputDispatcher:
         """Performs a clamped right-click."""
         return self.dispatch_click(x, y, button="right")
 
-    def dispatch_hover(self, x: int, y: int, duration_ms: int = 500) -> str:
+    def dispatch_hover(self, x: int, y: int, duration_ms: int = 200) -> str:
         """Positions cursor at coordinates without clicking to trigger hover states or tooltips."""
         self._verify_preconditions()
         cx, cy = global_clamper.validate_and_clamp(x, y)
@@ -154,7 +154,8 @@ class InputDispatcher:
         else:
             self.rd_client.notify_pointer_motion_absolute(target_x, target_y)
 
-        time.sleep(max(10, duration_ms) / 1000.0)
+        if duration_ms > 0:
+            time.sleep(duration_ms / 1000.0)
         self._apply_action_delay()
         return f"Hovered pointer at ({cx}, {cy}) for {duration_ms}ms"
 
@@ -172,36 +173,35 @@ class InputDispatcher:
         e_target_x = float(offset_x + e_x)
         e_target_y = float(offset_y + e_y)
 
+        steps = 4
         if self._has_ei_pointer():
             ei_client = self._get_ei_client()
             ei_client.pointer_motion_absolute(s_target_x, s_target_y)
-            time.sleep(0.05)
+            time.sleep(0.01)
             ei_client.button_down(BTN_LEFT)
-            time.sleep(0.05)
+            time.sleep(0.01)
 
-            steps = 10
             for i in range(1, steps + 1):
                 cur_x = s_target_x + (e_target_x - s_target_x) * (i / steps)
                 cur_y = s_target_y + (e_target_y - s_target_y) * (i / steps)
                 ei_client.pointer_motion_absolute(cur_x, cur_y)
-                time.sleep(0.01)
+                time.sleep(0.005)
 
-            time.sleep(0.05)
+            time.sleep(0.01)
             ei_client.button_up(BTN_LEFT)
         else:
             self.rd_client.notify_pointer_motion_absolute(s_target_x, s_target_y)
-            time.sleep(0.05)
+            time.sleep(0.01)
             self.rd_client.notify_pointer_button(BTN_LEFT, True)
-            time.sleep(0.05)
+            time.sleep(0.01)
 
-            steps = 10
             for i in range(1, steps + 1):
                 cur_x = s_target_x + (e_target_x - s_target_x) * (i / steps)
                 cur_y = s_target_y + (e_target_y - s_target_y) * (i / steps)
                 self.rd_client.notify_pointer_motion_absolute(cur_x, cur_y)
-                time.sleep(0.01)
+                time.sleep(0.005)
 
-            time.sleep(0.05)
+            time.sleep(0.01)
             self.rd_client.notify_pointer_button(BTN_LEFT, False)
 
         self._apply_action_delay()
@@ -236,26 +236,26 @@ class InputDispatcher:
         prefix = ""
         if x is not None and y is not None:
             prefix = self.dispatch_click(x, y, button="left") + ". "
-            time.sleep(0.05)
+            time.sleep(0.015)
 
         if self._is_mock():
             return f"{prefix}Typed {len(text)} characters"
 
         ei_client = self._get_ei_client()
 
-        # For long or multiline text, paste immediately via clipboard
+        # Use clipboard paste for long/multiline text when a clipboard backend is available
         if len(text) > 30 or "\n" in text:
-            self._paste_clipboard_text(text)
-            self._apply_action_delay()
-            return f"{prefix}Pasted {len(text)} characters via clipboard"
+            if self._paste_clipboard_text(text):
+                self._apply_action_delay()
+                return f"{prefix}Pasted {len(text)} characters via clipboard"
 
-        # For short text, simulate fast typing (pacing ~150ms per character)
+        # Fast keystroke injection without artificial human-typing slowdown
         can_type_pure = True
         for char in text:
             if not ei_client.type_char(char):
                 can_type_pure = False
                 break
-            time.sleep(0.150)
+            time.sleep(0.002)
 
         if not can_type_pure:
             self._paste_clipboard_text(text)
@@ -294,27 +294,30 @@ class InputDispatcher:
             return f"Copied {len(text)} characters to clipboard."
         return "Failed to write to clipboard: no supported clipboard backend available"
 
-    def _paste_clipboard_text(self, text: str) -> None:
+    def _paste_clipboard_text(self, text: str) -> bool:
         """Copies text to clipboard using available backend and sends Ctrl+V."""
         try:
-            write_system_clipboard(text)
-            time.sleep(0.05)
+            if not write_system_clipboard(text):
+                return False
+            time.sleep(0.015)
             if self._has_ei_keyboard():
                 ei_client = self._get_ei_client()
                 ei_client.key_press(KEY_LEFTCTRL, True)
-                time.sleep(0.02)
+                time.sleep(0.005)
                 ei_client.key_press(KEY_V, True)
-                time.sleep(0.02)
+                time.sleep(0.005)
                 ei_client.key_press(KEY_V, False)
-                time.sleep(0.02)
+                time.sleep(0.005)
                 ei_client.key_press(KEY_LEFTCTRL, False)
             else:
                 self.rd_client.notify_keyboard_keycode(KEY_LEFTCTRL, True)
-                time.sleep(0.02)
+                time.sleep(0.005)
                 self.rd_client.notify_keyboard_keycode(KEY_V, True)
-                time.sleep(0.02)
+                time.sleep(0.005)
                 self.rd_client.notify_keyboard_keycode(KEY_V, False)
-                time.sleep(0.02)
+                time.sleep(0.005)
                 self.rd_client.notify_keyboard_keycode(KEY_LEFTCTRL, False)
+            return True
         except Exception as exc:
             logger.warning("Clipboard paste fallback failed: %s", exc)
+            return False

@@ -1,6 +1,6 @@
 """Comprehensive unit tests targeting uncovered branches across modules.
 
-Boosts branch coverage for clipboard, process_tools, kwin, overlay, and navigation_tools.
+Boosts branch coverage for clipboard, process_tools, kwin, and navigation_tools.
 """
 
 from __future__ import annotations
@@ -9,7 +9,6 @@ import subprocess
 from unittest.mock import patch
 
 import pytest
-from PIL import Image
 
 from wayland_computer_use_mcp.clipboard import (
     read_system_clipboard,
@@ -26,14 +25,9 @@ from wayland_computer_use_mcp.compositors import (
 from wayland_computer_use_mcp.compositors import (
     query_window_geometry as query_kwin_geometry,
 )
-from wayland_computer_use_mcp.overlay import draw_labeled_overlay, load_overlay_font
 from wayland_computer_use_mcp.portal import global_portal_session
-from wayland_computer_use_mcp.tools.navigation_tools import (
-    batch_actions,
-    click_element_by_label,
-)
+from wayland_computer_use_mcp.tools.navigation_tools import batch_actions
 from wayland_computer_use_mcp.tools.process_tools import (
-    check_app_liveness,
     get_app_logs,
     launch_app,
     restart_app,
@@ -196,16 +190,6 @@ def test_process_tools_terminate_app():
         terminate_app(pid=None)
 
 
-def test_process_tools_check_liveness():
-    res_none = check_app_liveness(pid=None)
-    assert res_none["alive"] is False
-
-    with patch("wayland_computer_use_mcp.tools.process_tools.is_responsive", return_value=True):
-        res = check_app_liveness(pid=9999)
-        assert res["alive"] is True
-        assert res["pid"] == 9999
-
-
 def test_process_tools_get_app_logs():
     with patch(
         "wayland_computer_use_mcp.tools.process_tools.get_logs",
@@ -248,30 +232,7 @@ def test_kwin_window_helpers():
 
 
 # =========================================================================
-# 4. Overlay Rendering & Font Fallbacks
-# =========================================================================
-
-
-def test_overlay_font_fallback():
-    with patch("os.path.exists", return_value=False):
-        font = load_overlay_font()
-        assert font is not None
-
-
-def test_draw_labeled_overlay_scaling():
-    base_img = Image.new("RGB", (3840, 2160), color=(100, 100, 100))
-    elements = [
-        {"id": "b1", "bounds": [50, 50, 200, 80], "name": "4K Button"},
-        {"id": "lbl1", "bounds": [0, 0, 0, 0], "name": "Zero Dim"},
-        {"id": "e1", "bounds": [300, 300, 400, 60], "name": "Input Box"},
-    ]
-    annotated, legend = draw_labeled_overlay(base_img, elements)
-    assert annotated.size == (3840, 2160)
-    assert len(legend) == 3
-
-
-# =========================================================================
-# 5. Navigation Tools & Batch Actions
+# 4. Navigation Tools & Batch Actions
 # =========================================================================
 
 
@@ -310,13 +271,3 @@ def test_navigation_batch_actions():
         assert res["status"] == "success"
         assert res["executed_steps_count"] == 7
         assert mock_node_action.called
-
-
-def test_navigation_click_element_by_label():
-    with patch(
-        "wayland_computer_use_mcp.tools.navigation_tools.interact_with_node",
-        return_value="Clicked label",
-    ) as mock_node:
-        res = click_element_by_label("Submit", pid=5555)
-        assert res == "Clicked label"
-        mock_node.assert_called_once_with(target="Submit", action="click", pid=5555)

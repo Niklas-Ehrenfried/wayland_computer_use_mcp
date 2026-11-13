@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any
@@ -9,16 +10,42 @@ from typing import Any
 from dbus_fast import BusType, Message
 from dbus_fast.aio import MessageBus
 
+from wayland_computer_use_mcp._async import PersistentLoop
 from wayland_computer_use_mcp.a11y.constants import CONTAINER_ROLES, IGNORED_ROLES
 from wayland_computer_use_mcp.a11y.synthetic import build_synthetic_tree
 
 logger = logging.getLogger(__name__)
 
+_cached_bus_address: str | None = None
+_bus_pool: dict[int, MessageBus] = {}
+_atspi_loop = PersistentLoop(name="AtspiAsyncLoop")
 
-async def resolve_atspi_bus_address() -> str | None:
+
+def run_atspi_sync(coro_fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """Executes an async AT-SPI helper on the persistent AT-SPI event loop thread."""
+    return _atspi_loop.run(coro_fn(*args, **kwargs))
+
+
+def close_atspi_pool() -> None:
+    """Closes all pooled AT-SPI D-Bus connections and stops the background AT-SPI loop."""
+    global _cached_bus_address
+    for bus in list(_bus_pool.values()):
+        try:
+            bus.disconnect()
+        except Exception:
+            pass
+    _bus_pool.clear()
+    _cached_bus_address = None
+    _atspi_loop.stop()
+
+
+async def resolve_atspi_bus_address(force_refresh: bool = False) -> str | None:
     """Discovers the AT-SPI2 D-Bus socket address from session bus or environment."""
+    global _cached_bus_address
     if os.environ.get("AT_SPI_BUS_ADDRESS"):
         return os.environ["AT_SPI_BUS_ADDRESS"]
+    if _cached_bus_address and not force_refresh:
+        return _cached_bus_address
 
     try:
         session_bus = await MessageBus(bus_type=BusType.SESSION).connect()
@@ -58,28 +85,41 @@ async def resolve_atspi_bus_address() -> str | None:
 
         session_bus.disconnect()
         if reply and reply.body:
-            return str(reply.body[0])
+            _cached_bus_address = str(reply.body[0])
+            return _cached_bus_address
     except Exception as exc:
         logger.debug("Failed to query org.a11y.Bus: %s", exc)
 
-    # Standard system fallback path
     uid = os.getuid()
     fallback_socket = f"/run/user/{uid}/at-spi/bus_0"
     if os.path.exists(fallback_socket):
-        return f"unix:path={fallback_socket}"
+        _cached_bus_address = f"unix:path={fallback_socket}"
+        return _cached_bus_address
 
     return None
 
 
 class AtspiInspector:
-    """Async inspector for AT-SPI2 accessibility tree."""
+    """Async inspector for AT-SPI2 accessibility tree with D-Bus connection pooling."""
 
     def __init__(self, bus_address: str | None = None) -> None:
         self.bus_address = bus_address
         self.bus: MessageBus | None = None
+        self._pooled = False
 
     async def connect(self) -> bool:
-        """Connects to the AT-SPI2 D-Bus daemon."""
+        """Connects to (or reuses a pooled connection on) the AT-SPI2 D-Bus daemon."""
+        loop = asyncio.get_running_loop()
+        loop_id = id(loop)
+
+        if self.bus_address is None:
+            pooled = _bus_pool.get(loop_id)
+            if pooled is not None and getattr(pooled, "connected", True):
+                self.bus = pooled
+                self._pooled = True
+                return True
+            _bus_pool.pop(loop_id, None)
+
         if not self.bus_address:
             self.bus_address = await resolve_atspi_bus_address()
 
@@ -89,14 +129,16 @@ class AtspiInspector:
 
         try:
             self.bus = await MessageBus(bus_address=self.bus_address).connect()
+            _bus_pool[loop_id] = self.bus
+            self._pooled = True
             return True
         except Exception as exc:
             logger.debug("Failed to connect to AT-SPI bus at %s: %s", self.bus_address, exc)
             return False
 
     async def close(self) -> None:
-        """Closes the bus connection."""
-        if self.bus:
+        """Closes non-pooled bus connections (pooled connections stay warm for reuse)."""
+        if self.bus and not self._pooled:
             try:
                 self.bus.disconnect()
             except Exception:

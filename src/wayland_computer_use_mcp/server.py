@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import atexit
 import logging
+import os
 import signal
 import sys
+from importlib.resources import files as _pkg_files
 from pathlib import Path
 from typing import Any
 
@@ -51,13 +53,11 @@ from wayland_computer_use_mcp.tools.system_tools import (
     clipboard_read,
     clipboard_write,
     install_to_desktop,
+    register_desktop_installer_tools,
     uninstall_from_desktop,
     window_control,
 )
-from wayland_computer_use_mcp.tools.visual_tools import (
-    capture_window_frame,
-    take_labeled_screenshot,
-)
+from wayland_computer_use_mcp.tools.visual_tools import capture_window_frame
 
 logger = logging.getLogger("wayland_computer_use_mcp")
 
@@ -80,6 +80,14 @@ register_all_tools(mcp)
 def wayland_automation_guide() -> str:
     """Returns system prompt extension and execution guidelines for Wayland GUI automation."""
     try:
+        bundled = _pkg_files("wayland_computer_use_mcp").joinpath(
+            "instructions/system_prompt_extension.md"
+        )
+        if bundled.is_file():
+            return bundled.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    try:
         base_dir = Path(__file__).resolve().parent.parent.parent
         prompt_path = base_dir / "instructions" / "system_prompt_extension.md"
         if prompt_path.is_file():
@@ -99,7 +107,13 @@ def get_system_prompt_resource() -> str:
 
 
 def _cleanup_server_resources() -> None:
-    """Closes active portal sessions and terminates all child processes upon server exit."""
+    """Closes active portal sessions, AT-SPI pool, and terminates all child processes upon exit."""
+    try:
+        from wayland_computer_use_mcp.a11y import close_atspi_pool
+
+        close_atspi_pool()
+    except Exception:
+        pass
     try:
         from wayland_computer_use_mcp.portal import global_portal_session
 
@@ -114,10 +128,28 @@ def _cleanup_server_resources() -> None:
         pass
 
 
+_shutting_down = False
+
+
 def _handle_shutdown_signal(signum: int, frame: Any) -> None:
+    global _shutting_down
+    if _shutting_down:
+        return
+    _shutting_down = True
+    try:
+        signal.signal(signum, signal.SIG_DFL)
+    except (ValueError, OSError):
+        pass
     logger.info("Received termination signal %s, cleaning up resources...", signum)
     _cleanup_server_resources()
-    sys.exit(0)
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    # Exit immediately after synchronous cleanup so blocked anyio stdin reader
+    # threads cannot stall interpreter shutdown on Ctrl+C / SIGTERM.
+    os._exit(0)
 
 
 atexit.register(_cleanup_server_resources)
@@ -134,6 +166,12 @@ def main() -> None:
     cfg = get_config()
     remaining = cfg.apply_cli_args(sys.argv[1:])
     sys.argv = [sys.argv[0], *remaining]
+    if cfg.enable_desktop_installer:
+        register_desktop_installer_tools(mcp)
+    if cfg.display_mode == "virtual" and cfg.virtual_headed and not cfg.mock_mode:
+        from wayland_computer_use_mcp.portal import global_portal_session
+
+        global_portal_session._ensure_virtual_compositor()
     mcp.run()
 
 
@@ -162,7 +200,6 @@ __all__ = [
     "restart_app",
     "right_click",
     "scroll",
-    "take_labeled_screenshot",
     "terminate_app",
     "type_text",
     "uninstall_from_desktop",

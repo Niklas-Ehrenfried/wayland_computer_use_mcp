@@ -10,9 +10,9 @@ Your primary directive is to run interaction workflows with maximum execution sp
 * Never attempt to click an absolute pixel coordinate or guess alignment based on an image if a text-based semantic alternative exists.
 * **Immediate Startup**: `launch_app` directly returns the initial interactive elements list (`b1`, `e1`, `c1`), so you can interact immediately without making a redundant `inspect_ui_tree` call.
 * **Continuous Delta-to-Delta Navigation**: Every interaction returns an actionable JSON dictionary with `ui_changes` (`modified`, `appeared`, `hidden`), specifying the node ID, role, name/label, and states. Use these compact IDs directly in subsequent `interact_with_node` calls without re-querying the tree.
-* **Preset Workflows (`preset_workflow`)**: Save frequently executed multi-step interaction sequences (e.g., login flows, tab navigation, form fills) as reusable presets under `.agents/artifacts/presets/`. Run them atomically with a single `preset_workflow(name="...")` call to save tokens and minimize latency.
+* **Preset Workflows (`preset_workflow`)**: Save frequently executed multi-step interaction sequences (e.g., login flows, tab navigation, form fills) as reusable presets via `preset_workflow(action="save", ...)`. Run them atomically with a single `preset_workflow(action="run", name="...")` call to save tokens and minimize latency.
 * Your primary exploration tool when context is lost is `inspect_ui_tree`. Use the unique `id` (`b1`, `e1`) mapped out in the returned layout to isolate target elements.
-* Execute button presses, toggles, and selections by invoking accessibility layer tools (`interact_with_node`, `click_element_by_label`, or direct accessible action invocations) whenever supported by the UI toolkit.
+* Execute button presses, toggles, and text/slider updates by invoking accessibility layer tools (`interact_with_node` by node ID or widget label with optional `role` filter, or `batch_actions` for multi-step flows) whenever supported by the UI toolkit.
 
 ### 2. Multi-Modal Fallback Matrix
 You must prioritize navigation tools in this strict order:

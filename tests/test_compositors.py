@@ -144,7 +144,7 @@ async def test_gnome_backend_window_geometry():
 
         # Activation
         assert await backend.activate_and_raise_window(pid=5555) is True
-        assert await backend.set_window_state(5555, "minimize") is True
+        assert await backend.set_window_state(5555, "minimize") is False
         assert await backend.ensure_dialogs_above() is True
 
 
@@ -175,8 +175,26 @@ async def test_wlroots_backend_hyprland():
                 assert await backend.activate_and_raise_window(pid=7777) is True
                 assert mock_run.called
 
-                # Close
+                # Close & Maximize
                 assert await backend.set_window_state(7777, "close") is True
+                assert await backend.set_window_state(7777, "maximize") is True
+
+            mock_monitors = [
+                {
+                    "id": 0,
+                    "name": "DP-1",
+                    "x": 0,
+                    "y": 0,
+                    "width": 2560,
+                    "height": 1440,
+                    "focused": True,
+                }
+            ]
+            mon_proc = MagicMock(returncode=0, stdout=json.dumps(mock_monitors))
+            with patch("subprocess.run", return_value=mon_proc):
+                displays = await backend.get_active_displays()
+                assert len(displays) == 1
+                assert displays[0].width == 2560
 
 
 @pytest.mark.asyncio
@@ -199,6 +217,23 @@ async def test_wlroots_backend_sway():
             with patch("subprocess.run", return_value=mock_proc):
                 geom = await backend.get_window_geometry(pid=8888)
                 assert geom == WindowGeometry(10, 20, 640, 480)
+                assert await backend.activate_and_raise_window(pid=8888) is True
+                assert await backend.set_window_state(8888, "maximize") is True
+                assert await backend.set_window_state(8888, "close") is True
+
+            mock_outputs = [
+                {
+                    "name": "eDP-1",
+                    "active": True,
+                    "focused": True,
+                    "rect": {"x": 0, "y": 0, "width": 1920, "height": 1200},
+                }
+            ]
+            out_proc = MagicMock(returncode=0, stdout=json.dumps(mock_outputs))
+            with patch("subprocess.run", return_value=out_proc):
+                displays = await backend.get_active_displays()
+                assert len(displays) == 1
+                assert displays[0].height == 1200
 
 
 @pytest.mark.asyncio

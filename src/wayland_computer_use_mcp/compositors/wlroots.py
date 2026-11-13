@@ -102,21 +102,112 @@ class WlrootsBackend(CompositorBackend):
                 timeout=1.0,
             )
             return True
+        if os.environ.get("SWAYSOCK") and shutil.which("swaymsg"):
+            criteria = f"[pid={pid}]" if pid else (f'[title="{title}"]' if title else "")
+            if criteria:
+                proc = subprocess.run(
+                    ["swaymsg", f"{criteria} focus"],
+                    capture_output=True,
+                    timeout=1.0,
+                )
+                return proc.returncode == 0
         geom = await self.get_window_geometry(pid=pid, title=title)
         return geom is not None
 
     async def get_active_displays(self) -> list[DisplayInfo]:
+        if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") and shutil.which("hyprctl"):
+            try:
+                proc = subprocess.run(
+                    ["hyprctl", "-j", "monitors"], capture_output=True, text=True, timeout=1.0
+                )
+                if proc.returncode == 0:
+                    monitors = json.loads(proc.stdout)
+                    displays = [
+                        DisplayInfo(
+                            name=str(m.get("name", "Monitor")),
+                            x=int(m.get("x", 0)),
+                            y=int(m.get("y", 0)),
+                            width=int(m.get("width", 1920)),
+                            height=int(m.get("height", 1080)),
+                            scale=float(m.get("scale", 1.0)),
+                        )
+                        for m in sorted(
+                            monitors, key=lambda item: not bool(item.get("focused", False))
+                        )
+                    ]
+                    if displays:
+                        return displays
+            except Exception as exc:
+                logger.debug("Hyprland monitors query failed: %s", exc)
+
+        if os.environ.get("SWAYSOCK") and shutil.which("swaymsg"):
+            try:
+                proc = subprocess.run(
+                    ["swaymsg", "-t", "get_outputs"], capture_output=True, text=True, timeout=1.0
+                )
+                if proc.returncode == 0:
+                    outputs = json.loads(proc.stdout)
+                    displays = []
+                    for out in sorted(
+                        outputs, key=lambda item: not bool(item.get("focused", False))
+                    ):
+                        if not out.get("active", True):
+                            continue
+                        rect = out.get("rect", {})
+                        displays.append(
+                            DisplayInfo(
+                                name=str(out.get("name", "Output")),
+                                x=int(rect.get("x", 0)),
+                                y=int(rect.get("y", 0)),
+                                width=int(rect.get("width", 1920)),
+                                height=int(rect.get("height", 1080)),
+                                scale=float(out.get("scale", 1.0)),
+                            )
+                        )
+                    if displays:
+                        return displays
+            except Exception as exc:
+                logger.debug("Sway outputs query failed: %s", exc)
+
         return [DisplayInfo(name="Primary", x=0, y=0, width=1920, height=1080, scale=1.0)]
 
     async def set_window_state(self, pid: int, state: WindowState) -> bool:
         if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") and shutil.which("hyprctl"):
+            subprocess.run(
+                ["hyprctl", "dispatch", "focuswindow", f"pid:{pid}"],
+                capture_output=True,
+                timeout=1.0,
+            )
             if state == "close":
                 subprocess.run(
                     ["hyprctl", "dispatch", "closewindow", f"pid:{pid}"],
                     capture_output=True,
                     timeout=1.0,
                 )
-                return True
+            elif state in ("maximize", "restore"):
+                subprocess.run(
+                    ["hyprctl", "dispatch", "fullscreen", "1" if state == "maximize" else "0"],
+                    capture_output=True,
+                    timeout=1.0,
+                )
+            return True
+
+        if os.environ.get("SWAYSOCK") and shutil.which("swaymsg"):
+            cmd_map = {
+                "close": f"[pid={pid}] kill",
+                "maximize": f"[pid={pid}] fullscreen enable",
+                "restore": f"[pid={pid}] fullscreen disable",
+                "focus": f"[pid={pid}] focus",
+                "minimize": f"[pid={pid}] move scratchpad",
+            }
+            sway_cmd = cmd_map.get(state)
+            if sway_cmd:
+                proc = subprocess.run(
+                    ["swaymsg", sway_cmd],
+                    capture_output=True,
+                    timeout=1.0,
+                )
+                return proc.returncode == 0
         return True
 
     async def ensure_dialogs_above(self) -> bool:

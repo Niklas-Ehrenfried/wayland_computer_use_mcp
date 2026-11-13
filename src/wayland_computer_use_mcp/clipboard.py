@@ -1,10 +1,11 @@
-"""System clipboard abstraction supporting Wayland and X11 backends.
+"""System clipboard abstraction supporting Portal, Wayland CLI, KDE Klipper, and X11.
 
 Provides automatic backend discovery and fallback:
-1. wl-copy / wl-paste (Wayland native)
-2. qdbus6 org.kde.klipper (KDE Plasma 6)
-3. qdbus org.kde.klipper (KDE Plasma 5)
-4. xclip (Xwayland / X11)
+1. org.freedesktop.portal.Clipboard (XDG Portal >= 1.18 via D-Bus, zero CLI binaries)
+2. wl-copy / wl-paste (Wayland native CLI)
+3. qdbus6 org.kde.klipper (KDE Plasma 6)
+4. qdbus org.kde.klipper (KDE Plasma 5)
+5. xclip (Xwayland / X11)
 """
 
 from __future__ import annotations
@@ -16,8 +17,35 @@ import subprocess
 logger = logging.getLogger(__name__)
 
 
+def _portal_write_clipboard(text: str) -> bool:
+    try:
+        from wayland_computer_use_mcp.portal import global_portal_session
+
+        rd = getattr(global_portal_session, "_rd_client", None)
+        if rd and getattr(rd, "clipboard_enabled", False):
+            return bool(rd.write_clipboard_text(text))
+    except Exception as exc:
+        logger.debug("Portal clipboard write failed: %s", exc)
+    return False
+
+
+def _portal_read_clipboard() -> str | None:
+    try:
+        from wayland_computer_use_mcp.portal import global_portal_session
+
+        rd = getattr(global_portal_session, "_rd_client", None)
+        if rd and getattr(rd, "clipboard_enabled", False):
+            return rd.read_clipboard_text()
+    except Exception as exc:
+        logger.debug("Portal clipboard read failed: %s", exc)
+    return None
+
+
 def write_system_clipboard(text: str) -> bool:
     """Writes text into system clipboard using available backends."""
+    if _portal_write_clipboard(text):
+        return True
+
     if shutil.which("wl-copy"):
         try:
             subprocess.run(
@@ -78,6 +106,10 @@ def write_system_clipboard(text: str) -> bool:
 
 def read_system_clipboard() -> str:
     """Reads current text from system clipboard using available backends."""
+    portal_val = _portal_read_clipboard()
+    if portal_val is not None:
+        return portal_val
+
     if shutil.which("wl-paste"):
         try:
             res = subprocess.run(

@@ -94,10 +94,10 @@ def test_config_env_extras(monkeypatch):
     assert cfg.virtual_compositor_cmd == "kwin_wayland --virtual"
     assert cfg.action_delay_seconds == 0.25
 
-    # Invalid float should not crash and should retain default 0.1
+    # Invalid float should not crash and should retain default 0.0
     monkeypatch.setenv("WAYLAND_MCP_ACTION_DELAY", "invalid_float")
     cfg_invalid = Config.load()
-    assert cfg_invalid.action_delay_seconds == 0.1
+    assert cfg_invalid.action_delay_seconds == 0.0
 
 
 def test_set_and_get_config():

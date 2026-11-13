@@ -18,6 +18,7 @@ import time
 
 import pytest
 
+from wayland_computer_use_mcp.process import is_responsive
 from wayland_computer_use_mcp.server import (
     batch_actions,
     capture_window_frame,
@@ -27,7 +28,6 @@ from wayland_computer_use_mcp.server import (
     launch_app,
     terminate_app,
 )
-from wayland_computer_use_mcp.tools.process_tools import check_app_liveness
 
 
 @pytest.mark.live
@@ -43,8 +43,7 @@ def test_visible_interactive_gui_workflow():
         time.sleep(1.2)
 
         # 2. Verify process liveness
-        liveness = check_app_liveness(pid)
-        assert liveness["responsive"] is True
+        assert is_responsive(pid) is True
 
         # 3. Inspect UI tree and 1D interactive elements
         tree = inspect_ui_tree(pid=pid, max_depth=12)

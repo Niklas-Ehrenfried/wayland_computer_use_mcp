@@ -125,14 +125,16 @@ def launch(target_script: str, args: list[str] | None = None, cwd: str | None = 
             "env": env,
         }
 
-    # Start stderr consumer thread
-    thread = threading.Thread(
-        target=_consume_stream,
-        args=(proc.stderr, log_deque),
-        daemon=True,
-        name=f"stderr-reader-{pid}",
-    )
-    thread.start()
+    # Start reader threads for both stdout and stderr so neither pipe can deadlock
+    for stream_name, stream in (("stdout", proc.stdout), ("stderr", proc.stderr)):
+        if stream is not None:
+            thread = threading.Thread(
+                target=_consume_stream,
+                args=(stream, log_deque),
+                daemon=True,
+                name=f"{stream_name}-reader-{pid}",
+            )
+            thread.start()
 
     return pid
 

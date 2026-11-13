@@ -443,7 +443,7 @@ class EIClient:
             c.ei_device_button_button(dev, ctypes.c_uint32(button_code), True)
             c.ei_device_frame(dev, t1)
 
-            time.sleep(0.03)  # Small natural delay between press and release
+            time.sleep(0.008)
 
             t2 = self._get_time_now()
             c.ei_device_button_button(dev, ctypes.c_uint32(button_code), False)
@@ -562,14 +562,14 @@ class EIClient:
         keycode, needs_shift = CHAR_TO_KEYCODE[char]
         if needs_shift:
             self.key_press(KEY_LEFTSHIFT, True)
-            time.sleep(0.01)
+            time.sleep(0.002)
 
         self.key_press(keycode, True)
-        time.sleep(0.01)
+        time.sleep(0.002)
         self.key_press(keycode, False)
 
         if needs_shift:
-            time.sleep(0.01)
+            time.sleep(0.002)
             self.key_press(KEY_LEFTSHIFT, False)
 
         return True
@@ -578,18 +578,18 @@ class EIClient:
         """Dispatches a key combination: presses in order, releases in reverse."""
         for code in keycodes:
             self.key_press(code, True)
-            time.sleep(0.01)
+            time.sleep(0.003)
 
-        time.sleep(0.03)
+        time.sleep(0.01)
 
         for code in reversed(keycodes):
             self.key_press(code, False)
-            time.sleep(0.01)
+            time.sleep(0.003)
 
     def double_click(self, button_code: int = BTN_LEFT) -> None:
         """Dispatches a standard mouse double-click."""
         self.button_click(button_code)
-        time.sleep(0.08)
+        time.sleep(0.04)
         self.button_click(button_code)
 
     @property

@@ -8,8 +8,9 @@
 **`wayland-computer-use-mcp`** is a high-performance Model Context Protocol (MCP) server providing an interactive GUI testing, automation, and desktop integration suite for Wayland environments (KDE Plasma 6 / KWin, GNOME Mutter, Hyprland, Sway, and generic Wayland).
 
 Unlike conventional "computer use" agents that rely on high-latency video streaming and expensive pixel-based coordinate guessing, `wayland-computer-use-mcp` implements a **Tree-First Hybrid Semantic Execution Model**:
-- **Atomic Programmatic Execution**: Inspects semantic widget trees via AT-SPI2 D-Bus interfaces and executes actions (`DoAction`, `EditableText`, `Text`) directly without coordinate ambiguity.
-- **Observable Cursor Tracing**: Visibly translates the pointer over target elements prior to interaction, ensuring live tracking and transparency for human observers.
+- **Atomic Programmatic Execution**: Inspects semantic widget trees via AT-SPI2 D-Bus interfaces and executes actions (`DoAction`, `EditableText`, `Value`, `Text`) silently without moving the physical cursor.
+- **Zero-Disruption Interactions**: The desktop pointer only moves on explicit pointer tools (`click`, `hover`, `drag`) or when Level 1 AT-SPI is unsupported and Level 2 fallback is needed.
+- **Playwright-Style Locators & Deltas**: Supports optional `role` disambiguation (`target="Save", role="push button"`), event-driven UI settlement (`watch_ui_events`), and compact state diffs.
 - **Resilient Physical Fallback**: Custom canvas widgets, dropdown popovers, and complex surfaces fall back smoothly to clamped physical pointer clicks, drags, discrete wheel scrolls, and keystrokes.
 
 ---
@@ -31,7 +32,7 @@ Traditional screenshot-driven computer use models stream full monitor or window 
 1. **1D Semantic Flattening**: Automatically filters out invisible layout containers (`GtkBox`, `GtkOverlay`, `QBoxLayout`), distilling only actionable widgets into a compact array of indexed elements (`b1`, `e1`, `c1`) with their role, state, and label.
 2. **Direct Element Interaction**: Programmatic invocation via `interact_with_node(node_id="b1")` executes atomically without requiring intermediate verification screenshots.
 3. **Reactive State Diffing**: Every action automatically computes a pre- and post-interaction semantic delta, returning a concise markdown summary (e.g. `b1 [button]: text '0 clicks' ➔ '1 clicks'`), eliminating redundant tree re-polling.
-4. **Selective Visual Grounding**: Set-of-Marks visual overlays (`take_labeled_screenshot`) are utilized exclusively for layout or styling validation checkpoints.
+4. **Selective Visual Grounding**: High-resolution window captures (`capture_window_frame`) are utilized selectively for custom canvas layouts or styling/visual verification checkpoints.
 
 ---
 
@@ -43,11 +44,11 @@ The server operates in two distinct display modes and supports fine-grained acce
 - **Live Mode (`--live` or `WAYLAND_MCP_DISPLAY_MODE="live"`)** *(Default)*:
   - Connects to the user's active desktop session via `$WAYLAND_DISPLAY`.
   - Interfaces with the active session D-Bus and AT-SPI2 bus.
-  - Automatically caches and reuses XDG Desktop Portal `restore_token` credentials to prevent repeated permission prompts.
-  - Physically moves the desktop pointer so human operators can follow agent actions in real time.
-- **Virtual / Isolated Mode (`--virtual` or `WAYLAND_MCP_DISPLAY_MODE="virtual"`)**:
-  - Connects to or launches an isolated virtual Wayland compositor (e.g. `weston --backend=headless-backend.so`, `kwin_wayland --virtual`, or `gamescope`).
-  - Completely separates agent actions from personal desktop workspaces, enabling unattended, headless, or CI/CD test automation.
+  - Caches and reuses XDG Desktop Portal `restore_token` credentials to prevent repeated permission prompts.
+  - Executes Level 1 AT-SPI actions without moving the host cursor; physical pointer motion only triggers on explicit pointer tools or Level 2 fallback.
+- **Virtual / Isolated Mode (`--virtual`, `--virtual-window`, or `WAYLAND_MCP_DISPLAY_MODE="virtual"`)**:
+  - `--virtual`: Launches a headless virtual Wayland compositor (`weston --backend=headless-backend.so` or `kwin_wayland --virtual`) for unattended/CI testing.
+  - `--virtual-window` / `WAYLAND_MCP_VIRTUAL_HEADED=1`: Opens a **Playwright-style visible nested compositor window** (`weston`, `kwin_wayland`, or `sway`) on top of KDE, GNOME, Sway, or Hyprland so you can watch the agent drive an app in its own isolated surface.
 
 ### 2. Access Scopes
 - **Window Isolation (`--window-only` or `WAYLAND_MCP_ACCESS_MODE="window"`)** *(Default)*:
@@ -84,37 +85,34 @@ To guarantee safe operation despite upstream protocol constraints, this server i
 
 ## Quickstart
 
-### Run Directly via `uvx` (Zero installation required)
+### Run Directly via `uvx` (Pure-Python core, zero C-build dependencies)
 
 ```bash
 uvx wayland-computer-use-mcp
 ```
 
-### Linux Distribution Prerequisites
+The core package requires only pure/wheel dependencies (`fastmcp`, `dbus-fast`, `pillow`). Clipboard transfers use `org.freedesktop.portal.Clipboard` first (with `wl-clipboard`/`qdbus`/`xclip` fallbacks), and screenshots use native compositor capture, `gst-launch-1.0` CLI, or `org.freedesktop.portal.Screenshot`.
 
-`wayland-computer-use-mcp` utilizes native Wayland portals, AT-SPI2 accessibility D-Bus, and PyGObject for GTK4/Adwaita automation:
-
-- **Debian / Ubuntu / Pop!_OS**:
+- **Optional GStreamer Python bindings** (only needed for in-process PipeWire `appsink` streaming instead of CLI/native capture):
   ```bash
-  sudo apt install -y python3-gi python3-gi-cairo gir1.2-gtk-4.0 gir1.2-adw-1 at-spi2-core dbus-x11 wl-clipboard
+  uv pip install "wayland-computer-use-mcp[gstreamer]"
   ```
-- **Fedora / RHEL**:
+- **Visible isolated Playwright-style window across KDE / GNOME / Sway / Hyprland**:
   ```bash
-  sudo dnf install -y python3-gobject gtk4 libadwaita at-spi2-core dbus-x11 wl-clipboard
+  sudo apt install -y weston    # or Fedora: sudo dnf install weston / Arch: pacman -S weston
+  uvx wayland-computer-use-mcp --virtual-window
   ```
-- **Arch Linux / Manjaro**:
-  ```bash
-  sudo pacman -S --needed python-gobject gtk4 libadwaita at-spi2-core dbus wl-clipboard
-  ```
+- **Target app development libraries** (only if building/running the GTK4 example rig):
+  - **Debian / Ubuntu / Kubuntu**: `sudo apt install -y python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 at-spi2-core`
+  - **Fedora / RHEL**: `sudo dnf install -y python3-gobject gtk4 libadwaita at-spi2-core`
+  - **Arch Linux / Manjaro**: `sudo pacman -S --needed python-gobject gtk4 libadwaita at-spi2-core`
 
 ### Install in Virtual Environment
 
 ```bash
 git clone https://github.com/Niklas-Ehrenfried/wayland_computer_use_mcp.git
 cd wayland_computer_use_mcp
-uv venv --python python3 --system-site-packages
-source .venv/bin/activate
-uv pip install -e .
+uv sync
 ```
 
 ---
@@ -187,14 +185,14 @@ uv pip install -e .
 
 ---
 
-## Exposed Tool Suite (25 Tools)
+## Exposed Tool Suite (22 Default Tools + 2 Opt-In Tools)
 
 ### 1. Tree-First Semantic Navigation & Macro Presets (5 Tools)
-- **`inspect_ui_tree(pid, max_depth)`**: Returns the collapsed 1D interactive element list (`b1`, `e1`, `c1`, `sw1`, `li1`) with widget names, roles, states, and coordinates.
-- **`interact_with_node(node_id, action, text, settle_timeout_ms, ...)`**: Dispatches semantic interactions. Visibly traces cursor, executes AT-SPI action, waits for D-Bus UI event settlement, and falls back to physical input if required. Returns structured JSON UI deltas.
-- **`batch_actions(actions, pid)`**: Executes a batch of sequential UI operations atomically with step-by-step delta tracking without intermediate screenshot pauses.
-- **`preset_workflow(action, name, description, steps, pid)`**: Manages and executes reusable multi-step interaction presets (`list`, `run`, `view`, `save`, `delete`) stored as persistent JSON artifacts under `.agents/artifacts/presets/`.
-- **`watch_ui_events(pid, timeout_seconds)`**: Streams AT-SPI2 D-Bus accessibility events (`Object:StateChanged`, `ChildrenChanged`, `TextChanged`, `Window:Activate`) directly to observe async UI changes.
+- **`inspect_ui_tree(pid, max_depth)`**: Returns the collapsed 1D interactive element list (`b1`, `e1`, `c1`, `sw1`, `li1`) with widget names, roles, compact `states`, and coordinates.
+- **`interact_with_node(target, action, text, value, role, pid, settle_timeout_ms, ...)`**: Dispatches semantic interactions by compact ID (`b1`) or widget label (`node_id` kept as deprecated alias; optional `role` narrows matches like Playwright's `getByRole`). Executes Level 1 AT-SPI directly without moving the mouse cursor, falling back to physical input only when required. Returns structured JSON UI deltas.
+- **`batch_actions(actions, pid)`**: Executes a batch of sequential UI operations atomically with step-by-step delta tracking, optional per-step `"role"` filtering, and automatic `batch_failure.png` trace capture when a live step fails.
+- **`preset_workflow(action, name, description, steps, pid)`**: Manages and executes reusable multi-step interaction presets (`list`, `run`, `view`, `save`, `delete`) stored as persistent JSON artifacts.
+- **`watch_ui_events(timeout_ms, pid)`**: Streams AT-SPI2 D-Bus accessibility events (`Object:StateChanged`, `ChildrenChanged`, `TextChanged`, `Window:Activate`) directly to observe async UI changes.
 
 ### 2. Clamped Physical Input (8 Tools)
 - **`click(x, y, button, pid)`**: Executes a mouse click clamped to window bounds.
@@ -206,9 +204,8 @@ uv pip install -e .
 - **`type_text(text, x, y, pid)`**: Types text using evdev keycodes with automated clipboard paste fallback for strings > 30 characters.
 - **`key_combination(keys, pid)`**: Sends modifier hotkeys (e.g. `["ctrl", "s"]`, `["alt", "tab"]`). All 8 input tools accept an optional `pid` to explicitly target a specific application window.
 
-### 3. Visual Grounding & Inspection (2 Tools)
-- **`capture_window_frame(crop_box, save_artifact)`**: Captures a high-resolution window frame. In-memory MCP `ImageContent` by default; saves rolling disk cache when `save_artifact=True`.
-- **`take_labeled_screenshot(save_artifact)`**: Captures window frame annotated with Set-of-Marks boundary badges rendering compact semantic IDs (`[b1]`, `[e1]`, `[sw1]`) for zero-friction mental mapping to `interact_with_node`, covering all interactive widgets (including switches, list items, tree items, and table cells).
+### 3. Visual Grounding & Inspection (1 Tool)
+- **`capture_window_frame(crop_box, save_artifact, pid)`**: Captures a high-resolution window frame. In-memory MCP `ImageContent` by default; saves rolling disk cache when `save_artifact=True`.
 
 ### 4. Process Lifecycle & Crash Interception (5 Tools)
 - **`launch_app(target, args, restart, cwd)`**: Spawns Python GUI scripts or system apps with automatic virtual environment discovery. **Immediately returns the initial interactive element tree** so agents can act without a separate `inspect_ui_tree` call.
@@ -217,11 +214,13 @@ uv pip install -e .
 - **`list_managed_apps()`**: Lists all active processes managed by the MCP server, pruning dead PIDs.
 - **`get_app_logs(pid, lines)`**: Retrieves console output and crash tracebacks from a thread-safe circular buffer.
 
-### 5. OS & Desktop Integration (5 Tools)
-- **`clipboard_read()`**: Reads text from the Wayland clipboard (`wl-paste`).
-- **`clipboard_write(text)`**: Writes text to the Wayland clipboard (`wl-copy`).
+### 5. OS & Desktop Integration (3 Default Tools + 2 Opt-In Tools)
+- **`clipboard_read()`**: Reads text from clipboard (`org.freedesktop.portal.Clipboard` first, falling back to `wl-paste`, `qdbus`, `xclip`).
+- **`clipboard_write(text)`**: Writes text to clipboard (`org.freedesktop.portal.Clipboard` first, falling back to `wl-copy`, `qdbus`, `xclip`).
 - **`window_control(action, pid)`**: Controls window state (`minimize`, `maximize`, `restore`, `close`).
-- **`install_to_desktop(app_id, name, ...)`**: Generates a valid Linux `.desktop` launcher with worktree detection and version badging.
+
+Opt-in desktop shortcut tools (enable with `--enable-desktop-installer` or `WAYLAND_MCP_ENABLE_DESKTOP_INSTALLER=1`):
+- **`install_to_desktop(app_name, target, ...)`**: Generates a `.desktop` launcher in `~/.local/share/applications` for universal targets (Python scripts with auto-venv, shell scripts, JS, AppImages, binaries, Flatpak IDs, URLs, or `$PATH` commands) with nearby icon discovery, monogram SVG fallback, and worktree badging.
 - **`uninstall_from_desktop(app_id)`**: Removes desktop launchers and associated icons.
 
 ---

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import collections
 import logging
 from typing import Any
@@ -110,6 +109,22 @@ def flatten_tree(tree: dict[str, Any], pid: int = 0) -> list[dict[str, Any]]:
                 "center": center,
                 "bounds": bounds,
             }
+            tracked_states = [
+                s
+                for s in (
+                    "visible",
+                    "enabled",
+                    "showing",
+                    "focused",
+                    "checked",
+                    "selected",
+                    "expanded",
+                    "pressed",
+                )
+                if s in states
+            ]
+            if tracked_states:
+                elem["states"] = tracked_states
             if "focused" in states:
                 elem["focused"] = True
             if "value" in node and node["value"] is not None:
@@ -144,20 +159,10 @@ def flatten_tree(tree: dict[str, Any], pid: int = 0) -> list[dict[str, Any]]:
 
 def get_application_tree(pid: int, max_depth: int = 24) -> dict[str, Any]:
     """Synchronous entry point to retrieve pruned AT-SPI UI tree for a given PID."""
-    inspector = AtspiInspector()
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
+    from wayland_computer_use_mcp.a11y.client import run_atspi_sync
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                tree = executor.submit(
-                    asyncio.run, inspector.get_application_tree(pid, max_depth)
-                ).result()
-        else:
-            tree = loop.run_until_complete(inspector.get_application_tree(pid, max_depth))
-    except RuntimeError:
-        tree = asyncio.run(inspector.get_application_tree(pid, max_depth))
+    inspector = AtspiInspector()
+    tree = run_atspi_sync(inspector.get_application_tree, pid, max_depth)
 
     elements = flatten_tree(tree, pid=pid)
     tree["interactive_elements"] = elements

@@ -103,9 +103,14 @@ class GnomeBackend(CompositorBackend):
         return [DisplayInfo(name="Primary", x=0, y=0, width=1920, height=1080, scale=1.0)]
 
     async def set_window_state(self, pid: int, state: WindowState) -> bool:
-        # GNOME exposes window state control via Mutter/Shell Eval or DBus
-        logger.debug("set_window_state (%s) requested on GNOME for PID %s", state, pid)
-        return True
+        # Mutter blocks arbitrary Shell.Eval and unprivileged window-move D-Bus APIs.
+        # Clean close or maximization on GNOME relies on shortcuts or process signals.
+        logger.debug(
+            "set_window_state (%s) on GNOME for PID %s has no unprivileged Mutter D-Bus API",
+            state,
+            pid,
+        )
+        return False
 
     async def ensure_dialogs_above(self) -> bool:
         return True

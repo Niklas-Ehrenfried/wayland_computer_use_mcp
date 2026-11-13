@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import base64
 import io
-import json
 import logging
 from typing import Any
 
 from fastmcp import FastMCP
-from mcp.types import ImageContent, TextContent
+from mcp.types import ImageContent, TextContent, ToolAnnotations
 
 from wayland_computer_use_mcp.a11y import get_application_tree
 from wayland_computer_use_mcp.artifacts import get_artifacts_dir
@@ -22,7 +21,6 @@ from wayland_computer_use_mcp.compositors import (
 from wayland_computer_use_mcp.portal import (
     global_portal_session,
 )
-from wayland_computer_use_mcp.process import is_responsive
 from wayland_computer_use_mcp.security import (
     global_clamper,
     global_geometry_detector,
@@ -69,45 +67,6 @@ class CapturedFrameResult(list):
         return super().__repr__()
 
 
-class LabeledScreenshotResult(list):
-    """List containing Image and TextContent so FastMCP yields first-class ImageContent
-
-    while preserving dict-like access for unit tests.
-    """
-
-    def __init__(
-        self,
-        items: list[Any],
-        element_count: int,
-        elements: list[dict[str, Any]],
-        image_base64: str,
-        image_path: str = "",
-    ) -> None:
-        super().__init__(items)
-        self.element_count = element_count
-        self.elements = elements
-        self.image_base64 = image_base64
-        self.image_path = image_path
-
-    def __getitem__(self, key: Any) -> Any:
-        if key in ("element_count", "elements", "image", "image_base64", "image_path"):
-            return getattr(self, key if key != "image" else "image_base64")
-        return super().__getitem__(key)
-
-    def __contains__(self, key: Any) -> bool:
-        if key in ("element_count", "elements", "image", "image_base64", "image_path"):
-            return True
-        return super().__contains__(key)
-
-    def keys(self) -> list[str]:
-        return ["image", "image_base64", "element_count", "elements", "image_path"]
-
-    def get(self, key: str, default: Any = None) -> Any:
-        if key in ("element_count", "elements", "image", "image_base64", "image_path"):
-            return getattr(self, key if key != "image" else "image_base64")
-        return default
-
-
 def focus_window(pid: int | None = None) -> dict[str, Any]:
     """Directs focus and raises target window matching PID, ensuring it is in foreground."""
     effective_pid = pid or global_portal_session.target_pid
@@ -115,6 +74,20 @@ def focus_window(pid: int | None = None) -> dict[str, Any]:
         raise RuntimeError("No active target PID to focus. Launch an app first or provide PID.")
 
     global_portal_session.target_pid = effective_pid
+
+    if global_portal_session.is_mock:
+        from wayland_computer_use_mcp.a11y import _node_cache
+
+        if not _node_cache.get(effective_pid):
+            get_application_tree(effective_pid)
+        return {
+            "pid": effective_pid,
+            "name": global_portal_session.target_title or f"PID-{effective_pid}",
+            "role": "window",
+            "bounds": [0, 0, 1920, 1080],
+            "focused": True,
+        }
+
     tree = get_application_tree(effective_pid)
     title = None
     for child in tree.get("children", []):
@@ -153,78 +126,12 @@ def focus_window(pid: int | None = None) -> dict[str, Any]:
     }
 
 
-def take_labeled_screenshot(
-    pid: int | None = None,
-    save_artifact: bool = True,
-) -> list[Any]:
-    """Captures window frame with Set-of-Marks numbered bounding boxes and tags.
-
-    Returns image content alongside indexed element markers for visual reasoning.
-    """
-    _ensure_session_initialized()
-    effective_pid = pid or global_portal_session.target_pid
-    if not global_portal_session.is_mock:
-        global_portal_session.check_active_app(effective_pid)
-
-    if effective_pid:
-        try:
-            focus_window(effective_pid)
-        except Exception:
-            pass
-
-    pil_img, legend = global_portal_session.generate_labeled_screenshot(
-        pid=effective_pid, save_to_disk=False
-    )
-    buf = io.BytesIO()
-    pil_img.save(buf, format="PNG")
-    raw_bytes = buf.getvalue()
-    b64_data = base64.b64encode(raw_bytes).decode("utf-8")
-
-    embed_path = ""
-    embed_header = ""
-    if save_artifact:
-        try:
-            artifact_dir = get_artifacts_dir("screenshots")
-            artifact_dir.mkdir(parents=True, exist_ok=True)
-            artifact_path = artifact_dir / "latest_labeled.png"
-            artifact_path.write_bytes(raw_bytes)
-            embed_path = str(artifact_path.resolve())
-            embed_header = f"![Labeled Screenshot]({embed_path})\n\n"
-        except Exception:
-            pass
-
-    legend_text = json.dumps(
-        {
-            "element_count": len(legend),
-            "elements": legend,
-        },
-        indent=2,
-    )
-
-    items: list[Any] = [
-        TextContent(type="text", text=f"{embed_header}{legend_text}"),
-        ImageContent(
-            type="image",
-            data=b64_data,
-            mimeType="image/png",
-        ),
-    ]
-
-    return LabeledScreenshotResult(
-        items=items,
-        element_count=len(legend),
-        elements=legend,
-        image_base64=b64_data,
-        image_path=embed_path,
-    )
-
-
 def capture_window_frame(
     crop_box: list[int] | None = None,
-    save_artifact: bool = True,
+    save_artifact: bool = False,
     pid: int | None = None,
 ) -> list[Any]:
-    """Captures the target window buffer and renders it inline for the agent."""
+    """Captures window frame as in-memory ImageContent (saves PNG when save_artifact=True)."""
     _ensure_session_initialized()
     effective_pid = pid or global_portal_session.target_pid
     if effective_pid:
@@ -280,39 +187,10 @@ def capture_window_frame(
     return CapturedFrameResult(contents, raw_bytes=raw_bytes, file_path=embed_path)
 
 
-def get_window_geometry(pid: int) -> dict[str, Any]:
-    """Retrieves current surface geometry (x, y, width, height) and bounds."""
-    if not global_portal_session.is_mock and not is_responsive(pid):
-        raise RuntimeError(f"Application with PID {pid} is not active or responsive.")
-
-    tree = get_application_tree(pid)
-    title = None
-    for child in tree.get("children", []):
-        if child.get("role") in ("window", "frame") and child.get("name"):
-            title = child.get("name")
-            break
-
-    geom = query_kwin_geometry(pid=pid, title=title)
-    if geom:
-        wx, wy, ww, wh = geom
-        return {
-            "pid": pid,
-            "bounds": [wx, wy, ww, wh],
-            "width": ww,
-            "height": wh,
-            "x": wx,
-            "y": wy,
-        }
-
-    bounds = tree.get("bounds", [0, 0, 0, 0])
-    return {
-        "pid": pid,
-        "bounds": bounds,
-        "width": bounds[2] if len(bounds) >= 4 else 0,
-        "height": bounds[3] if len(bounds) >= 4 else 0,
-    }
-
-
 def register_visual_tools(mcp: FastMCP) -> None:
     """Registers visual grounding and screenshot tools onto FastMCP."""
-    mcp.tool()(capture_window_frame)
+    mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+        )
+    )(capture_window_frame)

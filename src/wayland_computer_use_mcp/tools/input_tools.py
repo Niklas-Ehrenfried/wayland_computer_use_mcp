@@ -6,8 +6,9 @@ import logging
 from typing import Any
 
 from fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
-from wayland_computer_use_mcp.delta import wrap_with_delta
+from wayland_computer_use_mcp.delta import InteractionResult, wrap_with_delta
 from wayland_computer_use_mcp.portal import global_portal_session
 from wayland_computer_use_mcp.process import check_process_health_and_enrich
 
@@ -27,91 +28,81 @@ def _sync_target_pid(pid: int | None) -> int:
     return effective_pid
 
 
-def click(x: int, y: int, button: str = "left", pid: int | None = None) -> Any:
+def _dispatch_tracked_input(
+    pid: int | None,
+    action_name: str,
+    target: str,
+    fn: Any,
+    *,
+    with_delta: bool = True,
+) -> InteractionResult:
+    effective_pid = _sync_target_pid(pid)
+    delta_pid = effective_pid if (with_delta and effective_pid > 0) else 0
+    res = wrap_with_delta(delta_pid, fn, action_name=action_name, target=target)
+    return check_process_health_and_enrich(global_portal_session.target_pid, res)
+
+
+def click(x: int, y: int, button: str = "left", pid: int | None = None) -> InteractionResult:
     """Dispatches a mouse click clamped within the active window boundaries."""
-    effective_pid = _sync_target_pid(pid)
-
-    def _do() -> str:
-        return global_portal_session.dispatch_click(x, y, button=button)
-
-    res = (
-        wrap_with_delta(effective_pid, _do, action_name="click", target=f"({x}, {y})")
-        if effective_pid > 0
-        else _do()
+    return _dispatch_tracked_input(
+        pid,
+        "click",
+        f"({x}, {y})",
+        lambda: global_portal_session.dispatch_click(x, y, button=button),
     )
-    return check_process_health_and_enrich(global_portal_session.target_pid, res)
 
 
-def double_click(x: int, y: int, button: str = "left", pid: int | None = None) -> Any:
+def double_click(x: int, y: int, button: str = "left", pid: int | None = None) -> InteractionResult:
     """Dispatches a double-click within the active window boundaries."""
-    effective_pid = _sync_target_pid(pid)
-
-    def _do() -> str:
-        return global_portal_session.dispatch_double_click(x, y, button=button)
-
-    res = (
-        wrap_with_delta(effective_pid, _do, action_name="double_click", target=f"({x}, {y})")
-        if effective_pid > 0
-        else _do()
+    return _dispatch_tracked_input(
+        pid,
+        "double_click",
+        f"({x}, {y})",
+        lambda: global_portal_session.dispatch_double_click(x, y, button=button),
     )
-    return check_process_health_and_enrich(global_portal_session.target_pid, res)
 
 
-def right_click(x: int, y: int, pid: int | None = None) -> Any:
+def right_click(x: int, y: int, pid: int | None = None) -> InteractionResult:
     """Dispatches a right-click within the active window boundaries."""
-    effective_pid = _sync_target_pid(pid)
-
-    def _do() -> str:
-        return global_portal_session.dispatch_right_click(x, y)
-
-    res = (
-        wrap_with_delta(effective_pid, _do, action_name="right_click", target=f"({x}, {y})")
-        if effective_pid > 0
-        else _do()
+    return _dispatch_tracked_input(
+        pid,
+        "right_click",
+        f"({x}, {y})",
+        lambda: global_portal_session.dispatch_right_click(x, y),
     )
-    return check_process_health_and_enrich(global_portal_session.target_pid, res)
 
 
-def hover(x: int, y: int, duration_ms: int = 500, pid: int | None = None) -> Any:
+def hover(x: int, y: int, duration_ms: int = 500, pid: int | None = None) -> InteractionResult:
     """Positions cursor at coordinates without clicking to trigger hover states or tooltips."""
-    _sync_target_pid(pid)
-    res = global_portal_session.dispatch_hover(x, y, duration_ms=duration_ms)
-    return check_process_health_and_enrich(global_portal_session.target_pid, res)
+    return _dispatch_tracked_input(
+        pid,
+        "hover",
+        f"({x}, {y})",
+        lambda: global_portal_session.dispatch_hover(x, y, duration_ms=duration_ms),
+        with_delta=False,
+    )
 
 
-def drag(start_x: int, start_y: int, end_x: int, end_y: int, pid: int | None = None) -> Any:
+def drag(
+    start_x: int, start_y: int, end_x: int, end_y: int, pid: int | None = None
+) -> InteractionResult:
     """Performs a clamped drag-and-drop gesture from start to end coordinates."""
-    effective_pid = _sync_target_pid(pid)
-
-    def _do() -> str:
-        return global_portal_session.dispatch_drag(start_x, start_y, end_x, end_y)
-
-    res = (
-        wrap_with_delta(
-            effective_pid,
-            _do,
-            action_name="drag",
-            target=f"({start_x}, {start_y}) -> ({end_x}, {end_y})",
-        )
-        if effective_pid > 0
-        else _do()
+    return _dispatch_tracked_input(
+        pid,
+        "drag",
+        f"({start_x}, {start_y}) -> ({end_x}, {end_y})",
+        lambda: global_portal_session.dispatch_drag(start_x, start_y, end_x, end_y),
     )
-    return check_process_health_and_enrich(global_portal_session.target_pid, res)
 
 
-def scroll(dx: int, dy: int, pid: int | None = None) -> Any:
+def scroll(dx: int, dy: int, pid: int | None = None) -> InteractionResult:
     """Dispatches discrete mouse wheel scroll deltas (positive dy=down, negative dy=up)."""
-    effective_pid = _sync_target_pid(pid)
-
-    def _do() -> str:
-        return global_portal_session.dispatch_scroll(dx, dy)
-
-    res = (
-        wrap_with_delta(effective_pid, _do, action_name="scroll", target=f"dx={dx}, dy={dy}")
-        if effective_pid > 0
-        else _do()
+    return _dispatch_tracked_input(
+        pid,
+        "scroll",
+        f"dx={dx}, dy={dy}",
+        lambda: global_portal_session.dispatch_scroll(dx, dy),
     )
-    return check_process_health_and_enrich(global_portal_session.target_pid, res)
 
 
 def type_text(
@@ -119,48 +110,43 @@ def type_text(
     x: int | None = None,
     y: int | None = None,
     pid: int | None = None,
-) -> Any:
+) -> InteractionResult:
     """Injects keyboard characters. If coordinates (x, y) are provided, clicks first to focus."""
-    effective_pid = _sync_target_pid(pid)
-
-    def _do() -> str:
-        return global_portal_session.dispatch_type_text(text, x=x, y=y)
-
-    res = (
-        wrap_with_delta(
-            effective_pid,
-            _do,
-            action_name="type_text",
-            target=f"({x}, {y})" if (x is not None and y is not None) else "focused",
-        )
-        if effective_pid > 0
-        else _do()
+    target = f"({x}, {y})" if (x is not None and y is not None) else "focused"
+    return _dispatch_tracked_input(
+        pid,
+        "type_text",
+        target,
+        lambda: global_portal_session.dispatch_type_text(text, x=x, y=y),
     )
-    return check_process_health_and_enrich(global_portal_session.target_pid, res)
 
 
-def key_combination(keys: list[str], pid: int | None = None) -> Any:
+def key_combination(keys: list[str], pid: int | None = None) -> InteractionResult:
     """Dispatches allowed key combinations (e.g. ['ctrl', 'c']) after security filtering."""
-    effective_pid = _sync_target_pid(pid)
-
-    def _do() -> str:
-        return global_portal_session.dispatch_key_combination(keys)
-
-    res = (
-        wrap_with_delta(effective_pid, _do, action_name="key_combination", target="+".join(keys))
-        if effective_pid > 0
-        else _do()
+    return _dispatch_tracked_input(
+        pid,
+        "key_combination",
+        "+".join(keys),
+        lambda: global_portal_session.dispatch_key_combination(keys),
     )
-    return check_process_health_and_enrich(global_portal_session.target_pid, res)
 
 
 def register_input_tools(mcp: FastMCP) -> None:
     """Registers coordinate mouse and keyboard injection tools onto FastMCP."""
-    mcp.tool()(click)
-    mcp.tool()(double_click)
-    mcp.tool()(right_click)
-    mcp.tool()(hover)
-    mcp.tool()(drag)
-    mcp.tool()(scroll)
-    mcp.tool()(type_text)
-    mcp.tool()(key_combination)
+    input_ann = ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+    for fn in (
+        click,
+        double_click,
+        right_click,
+        hover,
+        drag,
+        scroll,
+        type_text,
+        key_combination,
+    ):
+        mcp.tool(annotations=input_ann)(fn)

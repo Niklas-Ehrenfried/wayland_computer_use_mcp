@@ -4,15 +4,15 @@ from wayland_computer_use_mcp.server import (
     capture_window_frame,
     click,
     drag,
+    inspect_ui_tree,
     mcp,
     scroll,
     type_text,
 )
-from wayland_computer_use_mcp.tools.process_tools import check_app_liveness
 
 
 async def test_registered_tools():
-    # Active high-leverage exposed MCP tools (24 tools total)
+    # Active high-leverage exposed MCP tools (22 default tools; desktop installer is opt-in)
     exposed_tool_names = [
         "launch_app",
         "restart_app",
@@ -32,8 +32,6 @@ async def test_registered_tools():
         "key_combination",
         "clipboard_read",
         "clipboard_write",
-        "install_to_desktop",
-        "uninstall_from_desktop",
         "window_control",
         "list_managed_apps",
         "watch_ui_events",
@@ -41,12 +39,26 @@ async def test_registered_tools():
     ]
 
     tools = await mcp.list_tools()
-    registered_names = {t.name for t in tools}
+    tool_map = {t.name: t for t in tools}
+    registered_names = set(tool_map.keys())
 
     for name in exposed_tool_names:
         assert name in registered_names, f"Expected tool '{name}' to be registered"
 
-    assert len(registered_names) == 24
+    assert len(registered_names) == 22
+    assert "install_to_desktop" not in registered_names
+    assert "uninstall_from_desktop" not in registered_names
+
+    # Verify ToolAnnotations hints for MCP clients
+    assert tool_map["inspect_ui_tree"].annotations is not None
+    assert tool_map["inspect_ui_tree"].annotations.read_only_hint is True
+    assert tool_map["terminate_app"].annotations is not None
+    assert tool_map["terminate_app"].annotations.destructive_hint is True
+
+    # Verify interact_with_node schema exposes target as primary and node_id as deprecated
+    node_schema = tool_map["interact_with_node"].parameters["properties"]
+    assert "target" in node_schema
+    assert "Deprecated" in node_schema["node_id"].get("description", "")
 
     # Retired / consolidated tools should not pollute the exposed MCP surface
     retired_tools = [
@@ -90,10 +102,15 @@ def test_server_capture_and_input(monkeypatch):
     assert "Typed" in type_res_coords
 
 
-def test_server_process_liveness():
-    res = check_app_liveness(1234567)
-    assert res["pid"] == 1234567
-    assert res["responsive"] is False
+async def test_opt_in_desktop_installer_registration():
+    from fastmcp import FastMCP
+
+    from wayland_computer_use_mcp.tools.system_tools import register_desktop_installer_tools
+
+    opt_mcp = FastMCP("opt-in-test")
+    register_desktop_installer_tools(opt_mcp)
+    names = {t.name for t in await opt_mcp.list_tools()}
+    assert {"install_to_desktop", "uninstall_from_desktop"} <= names
 
 
 def test_active_app_protection(monkeypatch):
@@ -115,7 +132,5 @@ def test_active_app_protection(monkeypatch):
     with pytest.raises(RuntimeError, match="No active managed application"):
         click(10, 10)
 
-    from wayland_computer_use_mcp.server import take_labeled_screenshot
-
     with pytest.raises(RuntimeError, match="No active managed application"):
-        take_labeled_screenshot()
+        inspect_ui_tree()

@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from wayland_computer_use_mcp.presets import (
     delete_preset,
@@ -82,4 +83,8 @@ def preset_workflow(
 
 def register_preset_tools(mcp: FastMCP) -> None:
     """Registers preset macro workflow tools onto the FastMCP server."""
-    mcp.tool()(preset_workflow)
+    mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+        )
+    )(preset_workflow)

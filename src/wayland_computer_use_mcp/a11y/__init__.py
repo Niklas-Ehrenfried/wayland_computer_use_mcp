@@ -15,7 +15,11 @@ from wayland_computer_use_mcp.a11y.actions import (
     perform_accessible_set_text,
     perform_accessible_text_action,
 )
-from wayland_computer_use_mcp.a11y.client import AtspiInspector, resolve_atspi_bus_address
+from wayland_computer_use_mcp.a11y.client import (
+    AtspiInspector,
+    close_atspi_pool,
+    resolve_atspi_bus_address,
+)
 from wayland_computer_use_mcp.a11y.constants import (
     CONTAINER_ROLES,
     IGNORED_ROLES,
@@ -45,6 +49,7 @@ __all__ = [
     "_node_cache",
     "build_synthetic_tree",
     "clear_node_cache",
+    "close_atspi_pool",
     "do_accessible_action",
     "do_accessible_set_text",
     "do_accessible_text_action",

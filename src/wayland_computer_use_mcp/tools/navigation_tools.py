@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Annotated, Any
 
 from fastmcp import FastMCP
+from mcp.types import ToolAnnotations
+from pydantic import Field
 
 from wayland_computer_use_mcp.a11y import (
     get_application_tree,
@@ -59,9 +61,10 @@ def _resolve_target_node_id(pid: int, target: str, role: str | None = None) -> s
     if target in pid_cache:
         return target
 
-    cached = get_cached_node(pid, target)
-    if cached and "id" in cached:
-        return cached["id"]
+    if not role:
+        cached = get_cached_node(pid, target)
+        if cached and "id" in cached:
+            return cached["id"]
 
     target_lower = target.strip().lower()
     role_lower = role.strip().lower() if role else None
@@ -91,12 +94,6 @@ def inspect_ui_tree(pid: int | None = None, max_depth: int = 24) -> dict[str, An
         raise RuntimeError(f"Application with PID {effective_pid} is not active or responsive.")
 
     global_portal_session.target_pid = effective_pid
-    try:
-        from wayland_computer_use_mcp.tools.visual_tools import focus_window
-
-        focus_window(effective_pid)
-    except Exception:
-        pass
 
     tree = get_application_tree(effective_pid, max_depth=max_depth)
     tree["pid"] = effective_pid
@@ -105,11 +102,21 @@ def inspect_ui_tree(pid: int | None = None, max_depth: int = 24) -> dict[str, An
 
 
 def interact_with_node(
-    target: str | None = None,
+    target: Annotated[
+        str | None,
+        Field(description="Primary target: compact element ID (e.g. 'b1', 'e1') or widget label."),
+    ] = None,
     action: str = "click",
     text: str | None = None,
     value: float | None = None,
-    node_id: str | None = None,
+    role: Annotated[
+        str | None,
+        Field(description="Optional accessible role filter (e.g. 'push button', 'entry')."),
+    ] = None,
+    node_id: Annotated[
+        str | None,
+        Field(description="Deprecated alias for 'target'; prefer passing 'target'."),
+    ] = None,
     pid: int | None = None,
     start_offset: int = 0,
     end_offset: int = -1,
@@ -117,8 +124,10 @@ def interact_with_node(
 ) -> str:
     """Interacts with an interactive UI widget by 1D node ID (e.g. 'b1', 'e1') or label.
 
-    Executes Level 1 AT-SPI actions (with Level 2 coordinate fallback), visibly moves cursor,
-    and returns the post-action UI tree delta (modified/appeared widgets).
+    Executes Level 1 AT-SPI actions silently (without moving the cursor), falling back to
+    Level 2 coordinate/keyboard input only when AT-SPI is unsupported, and returns the
+    post-action UI tree delta (modified/appeared widgets). Optional ``role`` narrows name matches
+    like Playwright's ``getByRole``.
     Supports actions: click, type, set_value, clear, select_all, select_range, copy,
     paste, cut, drag_select, double_click, right_click, hover.
     """
@@ -140,14 +149,8 @@ def interact_with_node(
 
     if effective_pid > 0:
         global_portal_session.target_pid = effective_pid
-        try:
-            from wayland_computer_use_mcp.tools.visual_tools import focus_window
 
-            focus_window(effective_pid)
-        except Exception:
-            pass
-
-    resolved_node_id = _resolve_target_node_id(effective_pid, resolved_target)
+    resolved_node_id = _resolve_target_node_id(effective_pid, resolved_target, role=role)
     if not resolved_node_id:
         if global_portal_session.is_mock:
             resolved_node_id = resolved_target
@@ -172,7 +175,7 @@ def interact_with_node(
 
     target_ident = resolved_node_id or resolved_target
     is_live = effective_pid > 0 and not global_portal_session.is_mock
-    settle_ms = max(80, settle_timeout_ms) if is_live else 0
+    settle_ms = settle_timeout_ms if settle_timeout_ms > 0 else (25 if is_live else 0)
     raw_res = wrap_with_delta(
         effective_pid if not global_portal_session.is_mock else 0,
         _execute,
@@ -183,18 +186,6 @@ def interact_with_node(
     return check_process_health_and_enrich(effective_pid, raw_res)
 
 
-def click_element_by_label(
-    label: str,
-    role: str | None = None,
-    pid: int | None = None,
-) -> str:
-    """Finds an interactive element matching label in UI tree and clicks it with delta report."""
-    effective_pid = pid or global_portal_session.target_pid or 0
-    resolved = _resolve_target_node_id(effective_pid, label, role=role)
-    target = resolved or label
-    return interact_with_node(target=target, action="click", pid=effective_pid)
-
-
 def batch_actions(
     actions: list[dict[str, Any]],
     pid: int | None = None,
@@ -202,11 +193,11 @@ def batch_actions(
     """Executes a sequence of consecutive UI interactions with fail-fast reporting.
 
     Supported step schemas:
-    - {"action": "interact"|"click", "node_id": "b1"}
-    - {"action": "type", "text": "hello", "node_id": "e1"}
+    - {"action": "interact"|"click"|"double_click"|"right_click", "target": "b1"}
+    - {"action": "type"|"set_value"|"clear", "target": "e1", "text": "hello"}
     - {"action": "click", "x": 100, "y": 200, "button": "left"}
     - {"action": "key", "keys": ["ctrl", "a"]}
-    - {"action": "hover", "node_id": "b1"}
+    - {"action": "hover", "target": "b1"}
     - {"action": "wait", "ms": 200}
     """
     effective_pid = pid or global_portal_session.target_pid
@@ -216,12 +207,6 @@ def batch_actions(
         raise RuntimeError(f"Application with PID {effective_pid} is not active or responsive.")
 
     global_portal_session.target_pid = effective_pid
-    try:
-        from wayland_computer_use_mcp.tools.visual_tools import focus_window
-
-        focus_window(effective_pid)
-    except Exception:
-        pass
 
     executed_results: list[str] = []
     total_steps = len(actions)
@@ -233,29 +218,51 @@ def batch_actions(
             before = snapshot_interactive_state(effective_pid)
 
         try:
-            if action_type in ("interact", "click"):
-                if "node_id" in step:
-                    step_res = invoke_node_action(effective_pid, step["node_id"], action="click")
-                elif "x" in step and "y" in step:
-                    btn = step.get("button", "left")
-                    step_res = global_portal_session.dispatch_click(
-                        step["x"], step["y"], button=btn
-                    )
-                else:
-                    raise ValueError(f"Step {idx} 'click' requires either node_id or (x, y)")
+            raw_target = step.get("target") or step.get("node_id")
+            step_role = step.get("role")
+            resolved_id = (
+                _resolve_target_node_id(effective_pid, str(raw_target), role=step_role)
+                or str(raw_target)
+                if raw_target
+                else None
+            )
 
-            elif action_type == "type":
-                txt = step.get("text", "")
-                if "node_id" in step:
-                    cached = get_cached_node(effective_pid, step["node_id"])
-                    center = cached.get("center", [0, 0]) if cached else [0, 0]
-                    step_res = global_portal_session.dispatch_type_text(
-                        txt, x=center[0], y=center[1]
-                    )
+            if action_type in ("interact", "click", "double_click", "right_click"):
+                act = "click" if action_type == "interact" else action_type
+                if resolved_id is not None:
+                    step_res = invoke_node_action(effective_pid, resolved_id, action=act)
+                elif "x" in step and "y" in step:
+                    if act == "double_click":
+                        step_res = global_portal_session.dispatch_double_click(
+                            step["x"], step["y"], button=step.get("button", "left")
+                        )
+                    elif act == "right_click":
+                        step_res = global_portal_session.dispatch_right_click(step["x"], step["y"])
+                    else:
+                        step_res = global_portal_session.dispatch_click(
+                            step["x"], step["y"], button=step.get("button", "left")
+                        )
                 else:
+                    raise ValueError(
+                        f"Step {idx} '{action_type}' requires target/node_id or (x, y)"
+                    )
+
+            elif action_type in ("type", "set_value", "clear"):
+                txt = step.get("text", "")
+                if resolved_id is not None:
+                    step_res = invoke_node_action(
+                        effective_pid,
+                        resolved_id,
+                        action=action_type,
+                        text=txt,
+                        value=step.get("value"),
+                    )
+                elif action_type == "type":
                     step_res = global_portal_session.dispatch_type_text(
                         txt, x=step.get("x"), y=step.get("y")
                     )
+                else:
+                    raise ValueError(f"Step {idx} '{action_type}' requires target/node_id")
 
             elif action_type in ("key", "key_combination"):
                 keys = step.get("keys", [])
@@ -267,16 +274,19 @@ def batch_actions(
                 step_res = global_portal_session.dispatch_scroll(dx, dy)
 
             elif action_type == "hover":
-                if "node_id" in step:
-                    cached = get_cached_node(effective_pid, step["node_id"])
+                duration_ms = step.get("duration_ms", 100)
+                if resolved_id is not None:
+                    cached = get_cached_node(effective_pid, resolved_id)
                     center = cached.get("center", [0, 0]) if cached else [0, 0]
                     step_res = global_portal_session.dispatch_hover(
-                        center[0], center[1], duration_ms=step.get("duration_ms", 100)
+                        center[0], center[1], duration_ms=duration_ms
+                    )
+                elif "x" in step and "y" in step:
+                    step_res = global_portal_session.dispatch_hover(
+                        step["x"], step["y"], duration_ms=duration_ms
                     )
                 else:
-                    step_res = global_portal_session.dispatch_hover(
-                        step["x"], step["y"], duration_ms=step.get("duration_ms", 100)
-                    )
+                    raise ValueError(f"Step {idx} 'hover' requires target/node_id or (x, y)")
 
             elif action_type == "wait":
                 ms = step.get("ms", 100)
@@ -287,7 +297,7 @@ def batch_actions(
                 raise ValueError(f"Unknown action type '{action_type}' at step {idx}")
 
             if before is not None:
-                time.sleep(0.04)
+                time.sleep(0.02)
                 after = snapshot_interactive_state(effective_pid)
                 delta = compute_ui_delta(before, after)
                 step_res += format_delta_markdown(delta)
@@ -296,13 +306,25 @@ def batch_actions(
             executed_results.append(f"Step {idx}: {enriched}")
 
         except Exception as exc:
-            return {
+            failure_info: dict[str, Any] = {
                 "status": "failed",
                 "failed_step": idx,
                 "total_steps": total_steps,
                 "error": str(exc),
                 "executed_steps": executed_results,
             }
+            if not global_portal_session.is_mock and global_portal_session.is_active():
+                try:
+                    global_portal_session.capture_frame(
+                        save_to_disk=True, filename="batch_failure.png"
+                    )
+                    if global_portal_session.last_saved_frame_path:
+                        failure_info["failure_screenshot"] = (
+                            global_portal_session.last_saved_frame_path
+                        )
+                except Exception:
+                    pass
+            return failure_info
 
     return {
         "status": "success",
@@ -330,7 +352,13 @@ def watch_ui_events(
 
 def register_navigation_tools(mcp: FastMCP) -> None:
     """Registers semantic tree inspection and interaction tools onto the FastMCP server."""
-    mcp.tool()(inspect_ui_tree)
-    mcp.tool()(interact_with_node)
-    mcp.tool()(batch_actions)
-    mcp.tool()(watch_ui_events)
+    readonly_ann = ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    )
+    mutate_ann = ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    )
+    mcp.tool(annotations=readonly_ann)(inspect_ui_tree)
+    mcp.tool(annotations=mutate_ann)(interact_with_node)
+    mcp.tool(annotations=mutate_ann)(batch_actions)
+    mcp.tool(annotations=readonly_ann)(watch_ui_events)

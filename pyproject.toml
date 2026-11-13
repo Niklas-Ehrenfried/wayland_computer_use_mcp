@@ -28,8 +28,6 @@ dependencies = [
     "fastmcp>=2.0.0",
     "dbus-fast>=2.20.0",
     "pillow>=10.0.0",
-    "pycairo>=1.26.0",
-    "PyGObject>=3.48.0",
 ]
 
 [project.urls]
@@ -39,9 +37,13 @@ Issues = "https://github.com/Niklas-Ehrenfried/wayland_computer_use_mcp/issues"
 Changelog = "https://github.com/Niklas-Ehrenfried/wayland_computer_use_mcp/blob/master/TODO.md"
 
 [project.optional-dependencies]
+gstreamer = [
+    "PyGObject>=3.48.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
     "ruff>=0.4.0",
 ]
 

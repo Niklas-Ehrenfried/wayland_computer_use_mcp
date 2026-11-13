@@ -77,9 +77,19 @@ def compute_ui_delta(
             if b_val != a_val:
                 changes.append(f"value {b_val!r} ➔ {a_val!r}")
 
-            # 3. State changes (checked, focused)
-            b_states = b_info.get("states", set())
-            a_states = a_info.get("states", set())
+            # 3. Visibility transitions (e.g. Gtk.ListBox filtering clearing 'showing')
+            b_states = set(b_info.get("states", set()))
+            a_states = set(a_info.get("states", set()))
+            if ("showing" in b_states and "showing" not in a_states) or (
+                "visible" in b_states and "visible" not in a_states
+            ):
+                hidden.append(b_info)
+                continue
+            if "showing" not in b_states and "showing" in a_states and b_states:
+                appeared.append(a_info)
+                continue
+
+            # 4. State changes (checked, focused, selected, expanded, pressed)
             added_states = a_states - b_states
             removed_states = b_states - a_states
             if added_states or removed_states:
@@ -232,7 +242,19 @@ def wrap_with_delta(
     before = snapshot_interactive_state(pid)
     raw = action_fn()
     if settle_ms > 0:
-        time.sleep(settle_ms / 1000.0)
+        try:
+            from wayland_computer_use_mcp.a11y import global_event_listener
+
+            if global_event_listener.is_connected():
+                global_event_listener.wait_for_settled(
+                    timeout_ms=settle_ms,
+                    quiet_period_ms=min(20, settle_ms),
+                    pid=pid,
+                )
+            else:
+                time.sleep(settle_ms / 1000.0)
+        except Exception:
+            time.sleep(settle_ms / 1000.0)
     after = snapshot_interactive_state(pid)
 
     delta = compute_ui_delta(before, after)

@@ -7,11 +7,11 @@ import os
 import shutil
 import subprocess
 import tempfile
-from pathlib import Path
 from typing import Any
 
 from PIL import Image
 
+from wayland_computer_use_mcp.artifacts import get_artifacts_dir
 from wayland_computer_use_mcp.config import get_config
 
 logger = logging.getLogger(__name__)
@@ -29,16 +29,90 @@ try:
 except Exception as exc:
     logger.warning("GStreamer PyGObject bindings unavailable: %s", exc)
 
-DEFAULT_SAVE_DIR = Path.home() / ".cache" / "wayland-computer-use-mcp" / "screenshots"
+
+def _capture_portal_screenshot_frame() -> Image.Image | None:
+    """Attempts a non-interactive one-shot org.freedesktop.portal.Screenshot capture."""
+    try:
+        import asyncio
+        import time
+        from urllib.parse import unquote, urlparse
+
+        from dbus_fast import BusType, Message, MessageType, Variant
+        from dbus_fast.aio import MessageBus
+
+        async def _grab() -> str | None:
+            bus = await MessageBus(bus_type=BusType.SESSION).connect()
+            try:
+                sender = bus.unique_name[1:].replace(".", "_")
+                token = f"mcp_shot_{int(time.time() * 1000) % 1000000}"
+                expected = f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
+                fut: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
+
+                def _on_sig(msg: Message) -> None:
+                    if (
+                        msg.interface == "org.freedesktop.portal.Request"
+                        and msg.member == "Response"
+                        and msg.path == expected
+                        and not fut.done()
+                    ):
+                        if msg.body and msg.body[0] == 0 and len(msg.body) > 1:
+                            uri = msg.body[1].get("uri")
+                            fut.set_result(uri.value if isinstance(uri, Variant) else str(uri))
+                        else:
+                            fut.set_result(None)
+
+                bus.add_message_handler(_on_sig)
+                try:
+                    reply = await bus.call(
+                        Message(
+                            destination="org.freedesktop.portal.Desktop",
+                            path="/org/freedesktop/portal/desktop",
+                            interface="org.freedesktop.portal.Screenshot",
+                            member="Screenshot",
+                            signature="sa{sv}",
+                            body=[
+                                "",
+                                {
+                                    "handle_token": Variant("s", token),
+                                    "interactive": Variant("b", False),
+                                },
+                            ],
+                        )
+                    )
+                    if reply.message_type == MessageType.ERROR:
+                        return None
+                    return await asyncio.wait_for(fut, timeout=3.0)
+                finally:
+                    bus.remove_message_handler(_on_sig)
+            finally:
+                bus.disconnect()
+
+        uri = asyncio.run(_grab())
+        if not uri:
+            return None
+        path = unquote(urlparse(uri).path)
+        if path and os.path.exists(path):
+            try:
+                with Image.open(path) as img:
+                    return img.convert("RGB")
+            finally:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+    except Exception as exc:
+        logger.debug("Portal Screenshot fallback unavailable: %s", exc)
+    return None
 
 
 def capture_native_desktop_frame() -> Image.Image | None:
-    """Captures the active Wayland desktop frame using native compositor CLI utilities.
+    """Captures the active Wayland desktop frame using native utilities or Portal Screenshot.
 
     Supports:
     - KDE Plasma: spectacle (-b -n -o <path>)
     - wlroots / Sway: grim (<path>)
     - GNOME: gnome-screenshot (-f <path>)
+    - Universal fallback: org.freedesktop.portal.Screenshot (D-Bus, non-interactive)
     """
     cfg = get_config()
     if cfg.mock_mode or not os.environ.get("WAYLAND_DISPLAY"):
@@ -53,7 +127,7 @@ def capture_native_desktop_frame() -> Image.Image | None:
         cmd_template = ["gnome-screenshot", "-f"]
 
     if not cmd_template:
-        return None
+        return _capture_portal_screenshot_frame()
 
     tmp_path: str | None = None
     try:
@@ -79,7 +153,7 @@ def capture_native_desktop_frame() -> Image.Image | None:
             except OSError:
                 pass
 
-    return None
+    return _capture_portal_screenshot_frame()
 
 
 def crop_element(
@@ -107,6 +181,7 @@ class ScreenCastPipeline:
     """Manages GStreamer PipeWire appsink pipeline and frame capture."""
 
     def __init__(self) -> None:
+        self._node_id: int | None = None
         self._gst_pipeline: Any = None
         self._gst_appsink: Any = None
         self._last_frame: Image.Image | None = None
@@ -114,8 +189,9 @@ class ScreenCastPipeline:
 
     def setup_pipeline(self, node_id: int) -> None:
         """Build and start minimal GStreamer PipeWire appsink pipeline."""
+        self._node_id = node_id
         if not _GST_AVAILABLE:
-            logger.warning("GStreamer unavailable, skipping pipeline setup.")
+            logger.info("PyGObject GStreamer bindings absent; using CLI/native capture fallback.")
             return
 
         pipeline_desc = (
@@ -175,14 +251,59 @@ class ScreenCastPipeline:
             logger.debug("Failed to pull GStreamer sample: %s", exc)
             return None
 
+    def _pull_gst_cli_frame(self) -> Image.Image | None:
+        """Zero-PyGObject single-frame grab from PipeWire via gst-launch-1.0."""
+        if not self._node_id or not shutil.which("gst-launch-1.0"):
+            return None
+        tmp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                tmp_path = tf.name
+            proc = subprocess.run(
+                [
+                    "gst-launch-1.0",
+                    "-q",
+                    "pipewiresrc",
+                    f"path={self._node_id}",
+                    "num-buffers=1",
+                    "!",
+                    "videoconvert",
+                    "!",
+                    "pngenc",
+                    "!",
+                    "filesink",
+                    f"location={tmp_path}",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3.0,
+            )
+            if proc.returncode == 0 and os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+                with Image.open(tmp_path) as img:
+                    return img.convert("RGB")
+        except Exception as exc:
+            logger.debug("gst-launch-1.0 PipeWire grab failed: %s", exc)
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+        return None
+
     def pull_frame(self) -> Image.Image | None:
-        """Pulls the latest frame from GStreamer appsink, falling back to native capture."""
+        """Pulls the latest frame via GStreamer appsink, CLI PipeWire, or native/portal capture."""
         frame = self._pull_gst_frame()
         if frame is not None:
             self._last_frame = frame
             return frame
 
-        # Fallback to native compositor screenshot (spectacle, grim, gnome-screenshot)
+        cli_frame = self._pull_gst_cli_frame()
+        if cli_frame is not None:
+            self._last_frame = cli_frame
+            return cli_frame
+
+        # Fallback to native compositor screenshot (spectacle, grim, gnome-screenshot, portal)
         native = capture_native_desktop_frame()
         if native is not None:
             self._last_frame = native
@@ -192,10 +313,8 @@ class ScreenCastPipeline:
 
     def save_frame(self, frame: Image.Image, filename: str = "latest_capture.png") -> str | None:
         """Persists captured frame to disk and updates last_saved_frame_path."""
-        save_dir_env = os.environ.get("WAYLAND_MCP_SAVE_FRAMES_DIR")
-        save_dir = Path(save_dir_env) if save_dir_env else DEFAULT_SAVE_DIR
         try:
-            save_dir.mkdir(parents=True, exist_ok=True)
+            save_dir = get_artifacts_dir("screenshots")
             frame_path = save_dir / filename
             frame.save(frame_path)
             self.last_saved_frame_path = str(frame_path)
