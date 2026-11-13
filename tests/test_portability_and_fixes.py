@@ -53,15 +53,15 @@ def test_portal_session_close_releases_resources(monkeypatch):
     session = PortalSession()
     session._initialized = True
     mock_screencast_stop = MagicMock()
-    session._screencast.stop = mock_screencast_stop
+    session._host.screencast.stop = mock_screencast_stop
 
     mock_ei = MagicMock()
-    session._rd_client.ei_client = mock_ei
+    session._host.rd_client.ei_client = mock_ei
     mock_bus = MagicMock()
-    session._rd_client.bus = mock_bus
+    session._host.rd_client.bus = mock_bus
 
-    mock_proc = MagicMock()
-    session._virtual_proc = mock_proc
+    mock_blackbox_close = MagicMock()
+    session._blackbox.close = mock_blackbox_close
 
     session.close()
 
@@ -69,11 +69,9 @@ def test_portal_session_close_releases_resources(monkeypatch):
     mock_screencast_stop.assert_called_once()
     mock_ei.close.assert_called_once()
     mock_bus.disconnect.assert_called_once()
-    mock_proc.terminate.assert_called_once()
+    mock_blackbox_close.assert_called_once()
     assert session._initialized is False
-    assert session._virtual_proc is None
-    assert session.ei_client is None
-    assert session.bus is None
+    assert session._host.rd_client.bus is None
 
     # Verify AsyncLoopThread can still run work after close()
     async def _ping() -> str:
@@ -129,8 +127,7 @@ def test_launch_app_restart_updates_target_pid_and_elements(tmp_path, monkeypatc
     script.write_text("import time\ntime.sleep(5)\n")
 
     global_portal_session.target_pid = None
-    monkeypatch.setattr(global_portal_session, "_initialized", True)
-    monkeypatch.setattr(global_portal_session, "pipewire_node_id", 99999)
+    global_portal_session.ensure_initialized()
 
     first = launch_app(target=str(script))
     pid1 = first["pid"]
@@ -400,40 +397,56 @@ def test_level1_atspi_never_moves_cursor_even_offscreen(monkeypatch):
 
 
 def test_virtual_compositor_cmd_cross_de_and_flags(monkeypatch):
-    from wayland_computer_use_mcp.config import (
-        Config,
-        detect_virtual_compositor_cmd,
+    from wayland_computer_use_mcp.blackbox import (
+        KWinNestedAdapter,
+        WestonNestedAdapter,
+        WlrootsNestedAdapter,
+        select_blackbox_adapter,
     )
+    from wayland_computer_use_mcp.config import Config
 
-    # Headed/headless mode prefers kwin_wayland (direct isolated EIS + ScreenShot2/spectacle),
-    # then falls back to sway / weston
+    # Headed/headless mode prefers kwin_wayland, then falls back to labwc / sway / weston
     monkeypatch.setattr(
         "shutil.which",
         lambda name: f"/usr/bin/{name}" if name in {"weston", "kwin_wayland"} else None,
     )
-    assert detect_virtual_compositor_cmd(
+    adapter = select_blackbox_adapter()
+    assert isinstance(adapter, KWinNestedAdapter)
+    assert adapter.build_command(
         headed=True, socket_name="wl-test", host_wayland_display="wayland-0"
     ) == (
         "kwin_wayland --wayland-display wayland-0 --xwayland --no-lockscreen "
         "--no-global-shortcuts --width 1280 --height 800 --socket wl-test"
     )
-    assert detect_virtual_compositor_cmd(headed=False, socket_name="wl-test") == (
-        "kwin_wayland --virtual --socket wl-test --no-lockscreen --no-global-shortcuts "
-        "--width 1280 --height 800"
+    assert adapter.build_command(
+        headed=False, socket_name="wl-test", host_wayland_display=None
+    ) == (
+        "kwin_wayland --virtual --xwayland --no-lockscreen --no-global-shortcuts "
+        "--width 1280 --height 800 --socket wl-test"
     )
 
     monkeypatch.setattr(
         "shutil.which", lambda name: "/usr/bin/weston" if name == "weston" else None
     )
-    assert detect_virtual_compositor_cmd(headed=True, socket_name="wl-test") == (
-        "weston --socket=wl-test --width=1280 --height=800"
+    weston = select_blackbox_adapter()
+    assert isinstance(weston, WestonNestedAdapter)
+    assert weston.build_command(headed=True, socket_name="wl-test", host_wayland_display=None) == (
+        "weston --backend=wayland-backend.so --socket=wl-test"
     )
-    assert detect_virtual_compositor_cmd(headed=False, socket_name="wl-test") == (
-        "weston --backend=headless-backend.so --socket=wl-test --width=1280 --height=800"
+    assert (
+        weston.build_command(headed=False, socket_name="wl-test", host_wayland_display=None)
+        == "weston --backend=headless-backend.so --socket=wl-test"
     )
 
-    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/sway" if name == "sway" else None)
-    assert detect_virtual_compositor_cmd(headed=True, socket_name="wl-test") == "sway"
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/labwc" if name == "labwc" else None)
+    wlr = select_blackbox_adapter()
+    assert isinstance(wlr, WlrootsNestedAdapter)
+    assert (
+        wlr.build_command(
+            headed=True, socket_name="wl-test", host_wayland_display=None, config_dir="/tmp/c"
+        )
+        == "labwc -C /tmp/c"
+    )
 
     # CLI flags & env var
     cfg = Config()
@@ -522,8 +535,9 @@ def test_role_disambiguation_and_batch_failure_screenshot(monkeypatch, tmp_path)
         img = Image.new("RGB", (64, 48), "blue")
         if save_to_disk:
             p = tmp_path / (filename or "frame.png")
+            p.write_bytes(b"PNG")
             img.save(p, format="PNG")
-            global_portal_session._screencast.last_saved_frame_path = str(p)
+            global_portal_session.last_saved_frame_path = str(p)
         return img
 
     monkeypatch.setattr(global_portal_session, "capture_frame", _fake_capture)
@@ -643,24 +657,35 @@ def test_portal_clipboard_and_typing_fallback(monkeypatch):
         assert rd.write_clipboard_text("test-clip") is True
         assert rd.read_clipboard_text() == "hello portal clipboard"
 
-        # clipboard module delegates to portal first when enabled
-        monkeypatch.setattr(global_portal_session, "_rd_client", rd)
+        # clipboard module delegates to active driver first when enabled
+        monkeypatch.setattr(global_portal_session._host, "rd_client", rd)
+        monkeypatch.setattr(
+            global_portal_session, "active_driver", lambda: global_portal_session._host
+        )
         assert clipboard.write_system_clipboard("abc") is True
 
         # InputDispatcher falls back to char typing if clipboard write fails
         typed_chars = []
 
         class _FakeEI:
+            has_absolute_pointer = True
+            has_scroll = True
+            keyboard_device = 1
+
+            def can_type_text(self, text: str) -> bool:
+                return False
+
+            def resolve_key_name(self, key_name: str) -> int | None:
+                return None
+
             def type_char(self, ch: str) -> bool:
                 typed_chars.append(ch)
                 return True
 
         dispatcher = InputDispatcher(
-            rd,
+            get_sink_fn=lambda: _FakeEI(),
             verify_preconditions_fn=lambda: None,
             get_offsets_fn=lambda: (0, 0),
-            is_mock_fn=lambda: False,
-            get_ei_client_fn=lambda: _FakeEI(),
         )
         monkeypatch.setattr(
             "wayland_computer_use_mcp.portal.input.write_system_clipboard", lambda text: False
@@ -769,16 +794,32 @@ def test_virtual_session_manager_isolates_and_restores_env(monkeypatch, tmp_path
     mgr.ensure_started(cfg)
 
     try:
+        from wayland_computer_use_mcp.core.context import get_active_context
+
         assert mgr.is_running
-        assert os.environ["XDG_RUNTIME_DIR"] != str(host_xdg)
-        assert os.environ["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/tmp/isolated-dbus-test"
-        assert os.environ["WAYLAND_DISPLAY"] == "wayland-mcp-virtual"
-        assert "AT_SPI_BUS_ADDRESS" not in os.environ
+        ctx = get_active_context()
+        assert ctx is not None
+        assert ctx.is_isolated is True
+        assert ctx.xdg_runtime_dir != str(host_xdg)
+        assert ctx.dbus_address == "unix:path=/tmp/isolated-dbus-test"
+        assert ctx.wayland_display == "wayland-mcp-virtual"
+        assert ctx.atspi_bus_address is None
+        sub_env = ctx.build_subprocess_env()
+        assert sub_env["XDG_RUNTIME_DIR"] == ctx.xdg_runtime_dir
+        assert sub_env["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/tmp/isolated-dbus-test"
+        assert sub_env["WAYLAND_DISPLAY"] == "wayland-mcp-virtual"
+        assert "AT_SPI_BUS_ADDRESS" not in sub_env
         assert os.path.islink(os.path.join(mgr.runtime_dir or "", "wayland-0"))
         assert len(spawned) == 2
+        # Host process os.environ must remain untouched
+        assert os.environ["XDG_RUNTIME_DIR"] == str(host_xdg)
+        assert os.environ["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/tmp/host-bus"
+        assert os.environ["WAYLAND_DISPLAY"] == "wayland-0"
+        assert os.environ["AT_SPI_BUS_ADDRESS"] == "unix:path=/tmp/host-atspi"
     finally:
         mgr.stop()
 
+    assert get_active_context() is None
     assert os.environ["XDG_RUNTIME_DIR"] == str(host_xdg)
     assert os.environ["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/tmp/host-bus"
     assert os.environ["WAYLAND_DISPLAY"] == "wayland-0"

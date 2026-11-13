@@ -120,9 +120,8 @@ def test_active_app_protection(monkeypatch):
     from wayland_computer_use_mcp.portal import global_portal_session
 
     # Force live mode checks
-    monkeypatch.setattr(global_portal_session, "_is_mock", False)
     monkeypatch.setattr(get_config(), "mock_mode", False)
-    monkeypatch.setattr(global_portal_session, "pipewire_node_id", 42)
+    monkeypatch.setattr(global_portal_session, "is_active", lambda: True)
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
     global_portal_session.target_pid = None
 

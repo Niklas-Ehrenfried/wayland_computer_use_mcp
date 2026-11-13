@@ -65,8 +65,8 @@ def test_clipboard_module_skips_wayland_socket_in_mock_mode(monkeypatch):
 
     monkeypatch.setattr(cfg, "mock_mode", False)
     with (
-        patch("wayland_computer_use_mcp.clipboard._portal_write_clipboard", return_value=False),
-        patch("wayland_computer_use_mcp.clipboard._portal_read_clipboard", return_value=None),
+        patch("wayland_computer_use_mcp.clipboard._driver_write_clipboard", return_value=False),
+        patch("wayland_computer_use_mcp.clipboard._driver_read_clipboard", return_value=None),
         patch(
             "wayland_computer_use_mcp.wayland_clipboard.write_wayland_clipboard",
             return_value=True,

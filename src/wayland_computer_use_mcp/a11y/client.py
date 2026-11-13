@@ -45,15 +45,23 @@ def close_atspi_pool() -> None:
 
 
 async def resolve_atspi_bus_address(force_refresh: bool = False) -> str | None:
-    """Discovers the AT-SPI2 D-Bus socket address from session bus or environment."""
+    """Discovers the AT-SPI2 D-Bus socket address from session context, bus, or env."""
     global _cached_bus_address
-    if os.environ.get("AT_SPI_BUS_ADDRESS"):
+    from wayland_computer_use_mcp.core.context import get_active_context
+
+    ctx = get_active_context()
+    if ctx and ctx.atspi_bus_address:
+        return ctx.atspi_bus_address
+    if os.environ.get("AT_SPI_BUS_ADDRESS") and not (ctx and ctx.is_isolated):
         return os.environ["AT_SPI_BUS_ADDRESS"]
     if _cached_bus_address and not force_refresh:
         return _cached_bus_address
 
     try:
-        session_bus = await MessageBus(bus_type=BusType.SESSION).connect()
+        if ctx and ctx.dbus_address:
+            session_bus = await MessageBus(bus_address=ctx.dbus_address).connect()
+        else:
+            session_bus = await MessageBus(bus_type=BusType.SESSION).connect()
         reply = await session_bus.call(
             Message(
                 destination="org.a11y.Bus",
@@ -87,7 +95,11 @@ async def resolve_atspi_bus_address(force_refresh: bool = False) -> str | None:
         logger.debug("Failed to query org.a11y.Bus: %s", exc)
 
     uid = os.getuid()
-    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{uid}"
+    runtime_dir = (
+        (ctx.xdg_runtime_dir if ctx and ctx.xdg_runtime_dir else None)
+        or os.environ.get("XDG_RUNTIME_DIR")
+        or f"/run/user/{uid}"
+    )
     fallback_socket = os.path.join(runtime_dir, "at-spi", "bus_0")
     if os.path.exists(fallback_socket):
         _cached_bus_address = f"unix:path={fallback_socket}"

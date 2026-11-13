@@ -17,6 +17,7 @@ from wayland_computer_use_mcp.compositors.base import (
     WindowGeometry,
     WindowState,
 )
+from wayland_computer_use_mcp.core.context import get_active_context
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,10 @@ class WlrootsBackend(CompositorBackend):
     name: str = "wlroots"
 
     async def is_available(self) -> bool:
-        if not os.environ.get("WAYLAND_DISPLAY"):
+        ctx = get_active_context()
+        if ctx and ctx.is_isolated:
+            return False
+        if not ((ctx and ctx.wayland_display) or os.environ.get("WAYLAND_DISPLAY")):
             return False
         if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") and shutil.which("hyprctl"):
             return True

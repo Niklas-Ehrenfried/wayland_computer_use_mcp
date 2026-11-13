@@ -7,7 +7,7 @@ def test_default_config():
     cfg = Config()
     assert cfg.display_mode == "live"
     assert cfg.source_type == 2  # Window only by default
-    assert "headless" in cfg.virtual_compositor_cmd or "weston" in cfg.virtual_compositor_cmd
+    assert cfg.virtual_compositor_cmd == "auto"
 
 
 def test_env_overrides(monkeypatch):

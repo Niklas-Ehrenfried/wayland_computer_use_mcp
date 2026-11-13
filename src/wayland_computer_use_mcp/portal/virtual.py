@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
-from wayland_computer_use_mcp.config import Config, detect_virtual_compositor_cmd
+from wayland_computer_use_mcp.config import DEFAULT_VIRTUAL_CMD, Config
+from wayland_computer_use_mcp.core.context import SessionContext, set_active_context
 
 logger = logging.getLogger(__name__)
 
@@ -184,32 +185,49 @@ class VirtualSessionManager:
         self.wayland_display: str | None = None
         self.dbus_proc: subprocess.Popen[Any] | None = None
         self.compositor_proc: subprocess.Popen[Any] | None = None
-        self._eis_bus: Any = None
-        self._saved_env: dict[str, str | None] = {}
+        self.compositor_cmd: str | None = None
+        self.adapter: Any = None
 
     @property
     def is_running(self) -> bool:
         return self.compositor_proc is not None and self.compositor_proc.poll() is None
 
-    def _save_env(self) -> None:
-        if not self._saved_env:
-            for key in (
-                "XDG_RUNTIME_DIR",
-                "DBUS_SESSION_BUS_ADDRESS",
-                "WAYLAND_DISPLAY",
-                "AT_SPI_BUS_ADDRESS",
-            ):
-                self._saved_env[key] = os.environ.get(key)
+    @staticmethod
+    def _find_created_wayland_socket(runtime_dir: str, exclude: str | None = None) -> str | None:
+        """Detects a compositor-chosen Wayland socket (e.g. wayland-0 for sway/labwc)."""
+        try:
+            for entry in sorted(os.listdir(runtime_dir)):
+                if not entry.startswith("wayland-") or entry.endswith(".lock"):
+                    continue
+                if exclude and entry == exclude:
+                    continue
+                full = os.path.join(runtime_dir, entry)
+                if os.path.islink(full):
+                    continue
+                try:
+                    st = os.stat(full)
+                except OSError:
+                    continue
+                if stat.S_ISSOCK(st.st_mode):
+                    return entry
+        except OSError:
+            pass
+        return None
 
-    def _restore_env(self) -> None:
-        for key, prev in self._saved_env.items():
-            if prev is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = prev
-        self._saved_env.clear()
+    def to_context(self, cfg: Config | None = None) -> SessionContext:
+        """Builds an explicit SessionContext snapshot for the active virtual sandbox."""
+        headed = cfg.virtual_headed if cfg is not None else False
+        return SessionContext(
+            mode="blackbox",
+            xdg_runtime_dir=self.runtime_dir,
+            dbus_address=self.dbus_address,
+            wayland_display=self.wayland_display,
+            atspi_bus_address=None,
+            headed=headed,
+            is_isolated=True,
+        )
 
-    def ensure_started(self, cfg: Config) -> None:
+    def ensure_started(self, cfg: Config, adapter: Any | None = None) -> None:
         """Starts private XDG_RUNTIME_DIR, dbus-daemon, and nested/headless compositor."""
         if self.is_running:
             return
@@ -219,7 +237,6 @@ class VirtualSessionManager:
         if current_display and current_display == self.wayland_display:
             return
 
-        self._save_env()
         cleanup_stale_virtual_dirs()
         host_xdg = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
         host_wl = current_display
@@ -258,13 +275,36 @@ class VirtualSessionManager:
             comp_env["WAYLAND_DISPLAY"] = host_wl
         else:
             comp_env.pop("WAYLAND_DISPLAY", None)
+            comp_env.setdefault("WLR_BACKENDS", "headless")
 
-        cmd = detect_virtual_compositor_cmd(
-            headed=cfg.virtual_headed,
-            socket_name=socket_name,
-            explicit_cmd=cfg.virtual_compositor_cmd,
-            host_wayland_display=host_wl if cfg.virtual_headed else None,
-        )
+        explicit = cfg.virtual_compositor_cmd.strip()
+        is_auto = explicit.lower() in ("", DEFAULT_VIRTUAL_CMD)
+        if adapter is None:
+            from wayland_computer_use_mcp.blackbox.adapters import select_blackbox_adapter
+
+            adapter = select_blackbox_adapter(None if is_auto else explicit)
+        self.adapter = adapter
+
+        if is_auto:
+            empty_cfg_dir = os.path.join(private_xdg, "compositor-cfg")
+            os.makedirs(empty_cfg_dir, exist_ok=True)
+            cmd = adapter.build_command(
+                headed=cfg.virtual_headed,
+                socket_name=socket_name,
+                host_wayland_display=host_wl if cfg.virtual_headed else None,
+                config_dir=empty_cfg_dir,
+            )
+            if not cmd:
+                self.stop()
+                raise RuntimeError(
+                    "No nested Wayland compositor available for virtual mode. "
+                    "Install 'labwc' (recommended, e.g. sudo apt install labwc) or 'sway' / "
+                    "'weston'."
+                )
+        else:
+            cmd = explicit
+
+        self.compositor_cmd = cmd
         logger.info("Starting isolated virtual compositor (headed=%s): %s", cfg.virtual_headed, cmd)
         try:
             self.compositor_proc = subprocess.Popen(
@@ -279,20 +319,21 @@ class VirtualSessionManager:
             while time.time() < deadline:
                 if os.path.exists(socket_path):
                     break
+                detected = self._find_created_wayland_socket(private_xdg, exclude=host_wl)
+                if detected:
+                    socket_name = detected
+                    socket_path = os.path.join(private_xdg, socket_name)
+                    break
                 if self.compositor_proc.poll() is not None:
                     break
                 time.sleep(0.05)
 
             self.wayland_display = socket_name
-            os.environ["XDG_RUNTIME_DIR"] = private_xdg
-            if dbus_addr:
-                os.environ["DBUS_SESSION_BUS_ADDRESS"] = dbus_addr
-            os.environ["WAYLAND_DISPLAY"] = socket_name
-            os.environ.pop("AT_SPI_BUS_ADDRESS", None)
 
             from wayland_computer_use_mcp.a11y.client import reset_atspi_cache
             from wayland_computer_use_mcp.compositors import reset_compositor_backend
 
+            set_active_context(self.to_context(cfg))
             reset_atspi_cache()
             reset_compositor_backend()
         except Exception as exc:
@@ -328,93 +369,19 @@ class VirtualSessionManager:
                 time.sleep(0.02)
         return None
 
-    async def connect_direct_eis(self) -> tuple[int | None, str]:
-        """Connects directly to an isolated nested compositor's EIS service when supported."""
-        if not self.dbus_address:
-            return None, "no_private_dbus"
-
-        from dbus_fast import Message, MessageType
-        from dbus_fast.aio import MessageBus
-
-        if self._eis_bus is not None:
-            try:
-                self._eis_bus.disconnect()
-            except Exception:
-                pass
-            self._eis_bus = None
-
-        bus = await MessageBus(bus_address=self.dbus_address, negotiate_unix_fd=True).connect()
-        keep_bus = False
-        try:
-            kwin_ready = False
-            for _ in range(30):
-                reply = await bus.call(
-                    Message(
-                        destination="org.freedesktop.DBus",
-                        path="/org/freedesktop/DBus",
-                        interface="org.freedesktop.DBus",
-                        member="NameHasOwner",
-                        signature="s",
-                        body=["org.kde.KWin"],
-                    )
-                )
-                if reply.body and reply.body[0]:
-                    kwin_ready = True
-                    break
-                if not self.is_running:
-                    break
-                await asyncio.sleep(0.1)
-
-            if kwin_ready:
-                eis_reply = await asyncio.wait_for(
-                    bus.call(
-                        Message(
-                            destination="org.kde.KWin",
-                            path="/org/kde/KWin/EIS/RemoteDesktop",
-                            interface="org.kde.KWin.EIS.RemoteDesktop",
-                            member="connectToEIS",
-                            signature="i",
-                            body=[7],  # Pointer | AbsolutePointer | Keyboard
-                        )
-                    ),
-                    timeout=3.0,
-                )
-                if eis_reply.message_type != MessageType.ERROR and eis_reply.unix_fds:
-                    # Keep the D-Bus peer connected because KWin tears down EIS when
-                    # the requesting D-Bus client disconnects (NameOwnerChanged).
-                    self._eis_bus = bus
-                    keep_bus = True
-                    return os.dup(int(eis_reply.unix_fds[0])), "kwin_eis"
-                logger.warning(
-                    "Nested KWin connectToEIS failed: %s %s",
-                    eis_reply.error_name,
-                    eis_reply.body,
-                )
-                return None, "kwin_no_eis"
-
-            return None, "generic_isolated"
-        finally:
-            if not keep_bus:
-                bus.disconnect()
-
     def stop(self) -> None:
-        """Stops nested compositor & private D-Bus, restores env, and removes temp runtime dir."""
-        if self._eis_bus is not None:
-            try:
-                self._eis_bus.disconnect()
-            except Exception:
-                pass
-            self._eis_bus = None
-
+        """Stops nested compositor, private D-Bus, and removes temp runtime dir."""
         _terminate_proc_group(self.compositor_proc)
         self.compositor_proc = None
+        self.compositor_cmd = None
+        self.adapter = None
 
         _terminate_proc_group(self.dbus_proc)
         self.dbus_proc = None
 
         self.dbus_address = None
         self.wayland_display = None
-        self._restore_env()
+        set_active_context(None)
 
         if self.runtime_dir:
             _cleanup_runtime_artifacts(self.runtime_dir)

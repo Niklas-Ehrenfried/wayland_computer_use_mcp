@@ -15,7 +15,38 @@ import logging
 import shutil
 import subprocess
 
+from wayland_computer_use_mcp.core.context import get_active_context
+
 logger = logging.getLogger(__name__)
+
+
+def _driver_write_clipboard(text: str) -> bool:
+    try:
+        from wayland_computer_use_mcp.portal import global_portal_session
+
+        if global_portal_session.is_mock:
+            return False
+        return bool(global_portal_session.active_driver().write_clipboard(text))
+    except Exception as exc:
+        logger.debug("Driver clipboard write failed: %s", exc)
+    return False
+
+
+def _driver_read_clipboard() -> str | None:
+    try:
+        from wayland_computer_use_mcp.portal import global_portal_session
+
+        if global_portal_session.is_mock:
+            return None
+        return global_portal_session.active_driver().read_clipboard()
+    except Exception as exc:
+        logger.debug("Driver clipboard read failed: %s", exc)
+    return None
+
+
+def _subprocess_env() -> dict[str, str] | None:
+    ctx = get_active_context()
+    return ctx.build_subprocess_env() if ctx is not None else None
 
 
 def _wayland_write_clipboard(text: str) -> bool:
@@ -44,42 +75,21 @@ def _wayland_read_clipboard() -> str | None:
     return None
 
 
-def _portal_write_clipboard(text: str) -> bool:
-    try:
-        from wayland_computer_use_mcp.portal import global_portal_session
-
-        rd = getattr(global_portal_session, "_rd_client", None)
-        if rd and getattr(rd, "clipboard_enabled", False):
-            return bool(rd.write_clipboard_text(text))
-    except Exception as exc:
-        logger.debug("Portal clipboard write failed: %s", exc)
-    return False
-
-
-def _portal_read_clipboard() -> str | None:
-    try:
-        from wayland_computer_use_mcp.portal import global_portal_session
-
-        rd = getattr(global_portal_session, "_rd_client", None)
-        if rd and getattr(rd, "clipboard_enabled", False):
-            return rd.read_clipboard_text()
-    except Exception as exc:
-        logger.debug("Portal clipboard read failed: %s", exc)
-    return None
-
-
 def write_system_clipboard(text: str) -> bool:
     """Writes text into system clipboard using available backends."""
-    if _portal_write_clipboard(text):
+    if _driver_write_clipboard(text):
         return True
 
     if _wayland_write_clipboard(text):
         return True
 
+    ctx = get_active_context()
+    env = _subprocess_env()
     if shutil.which("wl-copy"):
         try:
             subprocess.run(
                 ["wl-copy", text],
+                env=env,
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -88,6 +98,9 @@ def write_system_clipboard(text: str) -> bool:
             return True
         except Exception as exc:
             logger.debug("wl-copy failed: %s", exc)
+
+    if ctx and ctx.is_isolated:
+        return False
 
     if shutil.which("qdbus6"):
         try:
@@ -136,18 +149,21 @@ def write_system_clipboard(text: str) -> bool:
 
 def read_system_clipboard() -> str:
     """Reads current text from system clipboard using available backends."""
-    portal_val = _portal_read_clipboard()
-    if portal_val is not None:
-        return portal_val
+    driver_val = _driver_read_clipboard()
+    if driver_val is not None:
+        return driver_val
 
     wayland_val = _wayland_read_clipboard()
     if wayland_val is not None:
         return wayland_val
 
+    ctx = get_active_context()
+    env = _subprocess_env()
     if shutil.which("wl-paste"):
         try:
             res = subprocess.run(
                 ["wl-paste", "--no-newline"],
+                env=env,
                 capture_output=True,
                 text=True,
                 timeout=1.0,
@@ -156,6 +172,9 @@ def read_system_clipboard() -> str:
                 return res.stdout
         except Exception as exc:
             logger.debug("wl-paste read failed: %s", exc)
+
+    if ctx and ctx.is_isolated:
+        return ""
 
     if shutil.which("qdbus6"):
         try:

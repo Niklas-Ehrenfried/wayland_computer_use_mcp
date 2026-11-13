@@ -154,8 +154,6 @@ def test_strict_window_confinement_and_app_presence(monkeypatch):
 
     # Force live checks
     monkeypatch.setattr(get_config(), "mock_mode", False)
-    monkeypatch.setattr(global_portal_session, "_is_mock", False)
-    monkeypatch.setattr(global_portal_session, "pipewire_node_id", 42)
     monkeypatch.setattr(global_portal_session, "_initialized", True)
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
 

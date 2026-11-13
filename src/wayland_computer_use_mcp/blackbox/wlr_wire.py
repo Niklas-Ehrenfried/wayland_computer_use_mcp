@@ -1,0 +1,494 @@
+"""Pure-Python Wayland wire helpers for wlroots capture and virtual input."""
+
+from __future__ import annotations
+
+import logging
+import mmap
+import os
+import select
+import struct
+import time
+from typing import Any
+
+from PIL import Image
+
+from wayland_computer_use_mcp.core.wayland_wire import (
+    bind_global_req,
+    build_msg,
+    connect_and_discover_globals,
+    create_shm_fd,
+    send_with_fd,
+)
+from wayland_computer_use_mcp.libei import (
+    BTN_LEFT,
+    BTN_MIDDLE,
+    BTN_RIGHT,
+    CHAR_TO_KEYCODE,
+    KEY_LEFTSHIFT,
+    KEY_RIGHTALT,
+    build_charmap_from_xkb,
+)
+
+logger = logging.getLogger(__name__)
+
+# Standard Wayland wl_shm format codes (little-endian memory byte order)
+WL_SHM_FORMAT_ARGB8888 = 0
+WL_SHM_FORMAT_XRGB8888 = 1
+WL_SHM_FORMAT_XBGR8888 = 0x34324258
+WL_SHM_FORMAT_ABGR8888 = 0x34324241
+
+_RAW_PIXEL_MODES: dict[int, tuple[str, str]] = {
+    WL_SHM_FORMAT_XRGB8888: ("RGB", "BGRX"),
+    WL_SHM_FORMAT_ARGB8888: ("RGBA", "BGRA"),
+    WL_SHM_FORMAT_XBGR8888: ("RGB", "RGBX"),
+    WL_SHM_FORMAT_ABGR8888: ("RGBA", "RGBA"),
+}
+
+
+def decode_shm_frame(
+    buf_bytes: bytes | memoryview,
+    shm_format: int,
+    width: int,
+    height: int,
+    stride: int,
+    y_invert: bool = False,
+) -> Image.Image | None:
+    """Converts a captured wl_shm byte buffer into an RGB PIL.Image."""
+    spec = _RAW_PIXEL_MODES.get(shm_format)
+    if spec is None or width <= 0 or height <= 0 or stride < width * 4:
+        return None
+    mode, raw_mode = spec
+    expected_len = stride * height
+    if len(buf_bytes) < expected_len:
+        return None
+    img = Image.frombytes(
+        mode, (width, height), bytes(buf_bytes[:expected_len]), "raw", raw_mode, stride, 1
+    )
+    if mode != "RGB":
+        img = img.convert("RGB")
+    if y_invert:
+        img = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+    return img
+
+
+def capture_wlr_screencopy(sock_path: str, timeout: float = 2.0) -> Image.Image | None:
+    """Captures an output frame via zwlr_screencopy_manager_v1 without external binaries."""
+    if not sock_path or not os.path.exists(sock_path):
+        return None
+
+    sock, globals_map, buf, _fds, next_id = connect_and_discover_globals(sock_path, timeout=1.0)
+    mem_fd: int | None = None
+    try:
+        if (
+            "zwlr_screencopy_manager_v1" not in globals_map
+            or "wl_shm" not in globals_map
+            or "wl_output" not in globals_map
+        ):
+            return None
+
+        shm_name, _ = globals_map["wl_shm"]
+        out_name, _ = globals_map["wl_output"]
+        mgr_name, mgr_ver = globals_map["zwlr_screencopy_manager_v1"]
+
+        shm_id = next_id
+        out_id = next_id + 1
+        mgr_id = next_id + 2
+        frame_id = next_id + 3
+        pool_id = next_id + 4
+        wl_buf_id = next_id + 5
+
+        init_req = (
+            bind_global_req(2, shm_name, "wl_shm", 1, shm_id)
+            + bind_global_req(2, out_name, "wl_output", 1, out_id)
+            + bind_global_req(2, mgr_name, "zwlr_screencopy_manager_v1", min(mgr_ver, 3), mgr_id)
+            + build_msg(mgr_id, 0, struct.pack("<IiI", frame_id, 0, out_id))
+        )
+        sock.sendall(init_req)
+
+        shm_params: tuple[int, int, int, int] | None = None
+        buffer_done = mgr_ver < 3
+        copied = False
+        flags = 0
+        ready = False
+        failed = False
+
+        deadline = time.monotonic() + timeout
+        while not ready and not failed and time.monotonic() < deadline:
+            if not copied and shm_params is not None and buffer_done:
+                fmt, w, h, stride = shm_params
+                size = stride * h
+                mem_fd = create_shm_fd("wlr_screencopy", size)
+                create_pool = build_msg(shm_id, 0, struct.pack("<Ii", pool_id, size))
+                send_with_fd(sock, create_pool, mem_fd)
+                copy_reqs = build_msg(
+                    pool_id, 0, struct.pack("<IiiiiI", wl_buf_id, 0, w, h, stride, fmt)
+                ) + build_msg(frame_id, 0, struct.pack("<I", wl_buf_id))
+                sock.sendall(copy_reqs)
+                copied = True
+
+            rlist, _, _ = select.select([sock], [], [], 0.15)
+            if not rlist:
+                continue
+            data = sock.recv(65536)
+            if not data:
+                break
+            buf.extend(data)
+            while len(buf) >= 8:
+                oid, sz_op = struct.unpack_from("<II", buf, 0)
+                sz = sz_op >> 16
+                op = sz_op & 0xFFFF
+                if sz < 8 or len(buf) < sz:
+                    break
+                body = bytes(buf[8:sz])
+                del buf[:sz]
+                if oid != frame_id:
+                    continue
+                if op == 0 and len(body) >= 16:  # buffer(fmt, w, h, stride)
+                    fmt, w, h, stride = struct.unpack_from("<IIII", body, 0)
+                    if fmt in _RAW_PIXEL_MODES and shm_params is None:
+                        shm_params = (fmt, w, h, stride)
+                elif op == 1 and len(body) >= 4:  # flags(flags)
+                    (flags,) = struct.unpack_from("<I", body, 0)
+                elif op == 2:  # ready
+                    ready = True
+                    break
+                elif op == 3:  # failed
+                    failed = True
+                    break
+                elif op == 6:  # buffer_done
+                    buffer_done = True
+
+        if not ready or shm_params is None or mem_fd is None:
+            return None
+
+        fmt, w, h, stride = shm_params
+        size = stride * h
+        with mmap.mmap(mem_fd, size, access=mmap.ACCESS_READ) as mm:
+            return decode_shm_frame(mm, fmt, w, h, stride, y_invert=bool(flags & 1))
+    except Exception as exc:
+        logger.debug("zwlr_screencopy_manager_v1 capture failed: %s", exc)
+        return None
+    finally:
+        if mem_fd is not None:
+            try:
+                os.close(mem_fd)
+            except OSError:
+                pass
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def _generate_default_xkb_keymap() -> str | None:
+    """Generates a standard US XKB keymap string using libxkbcommon.so.0 if installed."""
+    import ctypes
+    import ctypes.util
+
+    path = ctypes.util.find_library("xkbcommon") or "libxkbcommon.so.0"
+    try:
+        xkb = ctypes.CDLL(path)
+    except OSError:
+        return None
+
+    class _RuleNames(ctypes.Structure):
+        _fields_ = [
+            ("rules", ctypes.c_char_p),
+            ("model", ctypes.c_char_p),
+            ("layout", ctypes.c_char_p),
+            ("variant", ctypes.c_char_p),
+            ("options", ctypes.c_char_p),
+        ]
+
+    xkb.xkb_context_new.argtypes = [ctypes.c_int]
+    xkb.xkb_context_new.restype = ctypes.c_void_p
+    xkb.xkb_context_unref.argtypes = [ctypes.c_void_p]
+    xkb.xkb_keymap_new_from_names.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(_RuleNames),
+        ctypes.c_int,
+    ]
+    xkb.xkb_keymap_new_from_names.restype = ctypes.c_void_p
+    xkb.xkb_keymap_get_as_string.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    xkb.xkb_keymap_get_as_string.restype = ctypes.c_void_p
+    xkb.xkb_keymap_unref.argtypes = [ctypes.c_void_p]
+
+    libc = ctypes.CDLL(None)
+    libc.free.argtypes = [ctypes.c_void_p]
+
+    ctx = xkb.xkb_context_new(0)
+    if not ctx:
+        return None
+    try:
+        names = _RuleNames(None, None, b"us", None, None)
+        kmap = xkb.xkb_keymap_new_from_names(ctx, ctypes.byref(names), 0)
+        if not kmap:
+            return None
+        try:
+            raw_ptr = xkb.xkb_keymap_get_as_string(kmap, 0xFFFFFFFF)
+            if not raw_ptr:
+                return None
+            try:
+                return ctypes.c_char_p(raw_ptr).value.decode("utf-8", errors="ignore")
+            finally:
+                libc.free(raw_ptr)
+        finally:
+            xkb.xkb_keymap_unref(kmap)
+    finally:
+        xkb.xkb_context_unref(ctx)
+
+
+class WlrVirtualInputClient:
+    """InputSink backed by zwlr_virtual_pointer_v1 + zwp_virtual_keyboard_v1."""
+
+    def __init__(
+        self, sock_path: str | None = None, extent_w: int = 1280, extent_h: int = 800
+    ) -> None:
+        self.sock_path = sock_path
+        self.extent_w = max(1, extent_w)
+        self.extent_h = max(1, extent_h)
+        self._sock: Any = None
+        self._vptr_id: int = 0
+        self._vkbd_id: int = 0
+        self._xkb_charmap: dict[str, tuple[int, bool, bool]] = {}
+        self.has_absolute_pointer: bool = False
+        self.has_scroll: bool = False
+        self.keyboard_device: Any = None
+        self._last_x: float = 0.0
+        self._last_y: float = 0.0
+        self._t0 = time.monotonic()
+
+        if sock_path and os.path.exists(sock_path):
+            self._connect(sock_path)
+
+    def _ts_ms(self) -> int:
+        return int((time.monotonic() - self._t0) * 1000) & 0xFFFFFFFF
+
+    def _connect(self, sock_path: str) -> None:
+        sock, globals_map, _buf, _fds, next_id = connect_and_discover_globals(
+            sock_path, timeout=1.0
+        )
+        try:
+            seat = globals_map.get("wl_seat")
+            vptr_mgr = globals_map.get("zwlr_virtual_pointer_manager_v1")
+            vkbd_mgr = globals_map.get("zwp_virtual_keyboard_manager_v1")
+
+            reqs = b""
+            seat_id = 0
+            if seat:
+                seat_id = next_id
+                next_id += 1
+                reqs += bind_global_req(2, seat[0], "wl_seat", 1, seat_id)
+
+            if vptr_mgr:
+                mgr_id = next_id
+                vptr_id = next_id + 1
+                next_id += 2
+                reqs += bind_global_req(
+                    2, vptr_mgr[0], "zwlr_virtual_pointer_manager_v1", 1, mgr_id
+                )
+                reqs += build_msg(mgr_id, 0, struct.pack("<II", seat_id, vptr_id))
+                self._vptr_id = vptr_id
+                self.has_absolute_pointer = True
+                self.has_scroll = True
+
+            if vkbd_mgr and seat_id:
+                kmgr_id = next_id
+                vkbd_id = next_id + 1
+                next_id += 2
+                reqs += bind_global_req(
+                    2, vkbd_mgr[0], "zwp_virtual_keyboard_manager_v1", 1, kmgr_id
+                )
+                reqs += build_msg(kmgr_id, 0, struct.pack("<II", seat_id, vkbd_id))
+                self._vkbd_id = vkbd_id
+
+            if not reqs:
+                sock.close()
+                return
+
+            sock.sendall(reqs)
+            if self._vkbd_id:
+                kmap_str = _generate_default_xkb_keymap()
+                if kmap_str:
+                    kbytes = kmap_str.encode("utf-8") + b"\x00"
+                    kfd = create_shm_fd("wlr_xkb_keymap")
+                    try:
+                        os.write(kfd, kbytes)
+                        send_with_fd(
+                            sock,
+                            build_msg(self._vkbd_id, 0, struct.pack("<II", 1, len(kbytes))),
+                            kfd,
+                        )
+                    finally:
+                        os.close(kfd)
+                    self._xkb_charmap = build_charmap_from_xkb(kmap_str)
+                    self.keyboard_device = self._vkbd_id
+            self._sock = sock
+        except Exception as exc:
+            logger.debug("WlrVirtualInputClient init failed: %s", exc)
+            try:
+                sock.close()
+            except OSError:
+                pass
+            self.has_absolute_pointer = False
+            self.keyboard_device = None
+
+    def _send(self, data: bytes) -> bool:
+        if self._sock is None:
+            return False
+        try:
+            self._sock.sendall(data)
+            return True
+        except OSError:
+            return False
+
+    def pointer_motion_absolute(self, x: float, y: float) -> bool:
+        if not self._vptr_id:
+            return False
+        self._last_x = float(x)
+        self._last_y = float(y)
+        ix = max(0, min(self.extent_w - 1, int(round(x))))
+        iy = max(0, min(self.extent_h - 1, int(round(y))))
+        pkt = build_msg(
+            self._vptr_id,
+            1,
+            struct.pack("<IIIII", self._ts_ms(), ix, iy, self.extent_w, self.extent_h),
+        ) + build_msg(self._vptr_id, 4)
+        return self._send(pkt)
+
+    @staticmethod
+    def _button_code(button: int | str) -> int:
+        if isinstance(button, int):
+            return button
+        return {"left": BTN_LEFT, "middle": BTN_MIDDLE, "right": BTN_RIGHT}.get(
+            button.lower(), BTN_LEFT
+        )
+
+    def button_down(self, button_code: int | str = BTN_LEFT) -> bool:
+        if not self._vptr_id:
+            return False
+        code = self._button_code(button_code)
+        pkt = build_msg(self._vptr_id, 2, struct.pack("<III", self._ts_ms(), code, 1)) + build_msg(
+            self._vptr_id, 4
+        )
+        return self._send(pkt)
+
+    def button_up(self, button_code: int | str = BTN_LEFT) -> bool:
+        if not self._vptr_id:
+            return False
+        code = self._button_code(button_code)
+        pkt = build_msg(self._vptr_id, 2, struct.pack("<III", self._ts_ms(), code, 0)) + build_msg(
+            self._vptr_id, 4
+        )
+        return self._send(pkt)
+
+    def button_click(self, button_code: int | str = BTN_LEFT) -> bool:
+        if not self.button_down(button_code):
+            return False
+        time.sleep(0.02)
+        return self.button_up(button_code)
+
+    def double_click(self, button_code: int | str = BTN_LEFT) -> bool:
+        if not self.button_click(button_code):
+            return False
+        time.sleep(0.04)
+        return self.button_click(button_code)
+
+    def scroll(self, dx: float, dy: float) -> bool:
+        if not self._vptr_id:
+            return False
+        pkt = b""
+        ts = self._ts_ms()
+        if dy:
+            fixed_y = int(round(dy * 15 * 256))
+            pkt += build_msg(self._vptr_id, 3, struct.pack("<IIi", ts, 0, fixed_y))
+        if dx:
+            fixed_x = int(round(dx * 15 * 256))
+            pkt += build_msg(self._vptr_id, 3, struct.pack("<IIi", ts, 1, fixed_x))
+        if not pkt:
+            return True
+        return self._send(pkt + build_msg(self._vptr_id, 4))
+
+    def can_type_text(self, text: str) -> bool:
+        if not self._vkbd_id:
+            return False
+        if self._xkb_charmap:
+            return all(ch in self._xkb_charmap for ch in text)
+        return all(ch in CHAR_TO_KEYCODE for ch in text)
+
+    def resolve_key_name(self, key_name: str) -> int | None:
+        if len(key_name) == 1 and self._xkb_charmap:
+            entry = self._xkb_charmap.get(key_name.lower())
+            if entry is not None:
+                return entry[0]
+        return None
+
+    def _emit_key(self, keycode: int, pressed: bool) -> bool:
+        return self._send(
+            build_msg(
+                self._vkbd_id,
+                1,
+                struct.pack("<III", self._ts_ms(), keycode, 1 if pressed else 0),
+            )
+        )
+
+    def type_char(self, ch: str) -> bool:
+        if not self._vkbd_id:
+            return False
+        need_altgr = False
+        if self._xkb_charmap:
+            mapping = self._xkb_charmap.get(ch)
+            if not mapping:
+                return False
+            keycode, need_shift, need_altgr = mapping
+        else:
+            mapping2 = CHAR_TO_KEYCODE.get(ch)
+            if not mapping2:
+                return False
+            keycode, need_shift = mapping2
+
+        if need_shift:
+            self._emit_key(KEY_LEFTSHIFT, True)
+        if need_altgr:
+            self._emit_key(KEY_RIGHTALT, True)
+        ok = self._emit_key(keycode, True) and self._emit_key(keycode, False)
+        if need_altgr:
+            self._emit_key(KEY_RIGHTALT, False)
+        if need_shift:
+            self._emit_key(KEY_LEFTSHIFT, False)
+        return ok
+
+    def key_press(self, keycode: int, is_down: bool) -> None:
+        if self._vkbd_id:
+            self._emit_key(keycode, is_down)
+
+    def key_combination(self, keycodes: list[int]) -> None:
+        if not self._vkbd_id:
+            return
+        for code in keycodes:
+            self.key_press(code, True)
+            time.sleep(0.003)
+        time.sleep(0.01)
+        for code in reversed(keycodes):
+            self.key_press(code, False)
+            time.sleep(0.003)
+
+    def close(self) -> None:
+        if self._sock is not None:
+            try:
+                if self._vptr_id:
+                    self._sock.sendall(build_msg(self._vptr_id, 8))
+                if self._vkbd_id:
+                    self._sock.sendall(build_msg(self._vkbd_id, 3))
+            except OSError:
+                pass
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+        self._vptr_id = 0
+        self._vkbd_id = 0
+        self.has_absolute_pointer = False
+        self.has_scroll = False
+        self.keyboard_device = None

@@ -109,13 +109,18 @@ def capture_native_desktop_frame() -> Image.Image | None:
     """Captures the active Wayland desktop frame using native utilities or Portal Screenshot.
 
     Supports:
+    - Isolated/wlroots Wayland wire capture (`zwlr_screencopy_manager_v1`)
     - KDE Plasma: spectacle (-b -n -o <path>)
     - wlroots / Sway: grim (<path>)
     - GNOME: gnome-screenshot (-f <path>)
     - Universal fallback: org.freedesktop.portal.Screenshot (D-Bus, non-interactive)
     """
+    from wayland_computer_use_mcp.core.context import get_active_context
+
     cfg = get_config()
-    if cfg.mock_mode or not os.environ.get("WAYLAND_DISPLAY"):
+    ctx = get_active_context()
+    has_display = bool((ctx and ctx.wayland_display) or os.environ.get("WAYLAND_DISPLAY"))
+    if cfg.mock_mode or not has_display:
         return None
 
     cmd_template: list[str] | None = None
@@ -127,6 +132,15 @@ def capture_native_desktop_frame() -> Image.Image | None:
         cmd_template = ["gnome-screenshot", "-f"]
 
     if not cmd_template:
+        sock_path = ctx.wayland_socket_path() if ctx else None
+        if sock_path:
+            from wayland_computer_use_mcp.blackbox.wlr_wire import capture_wlr_screencopy
+
+            wlr_img = capture_wlr_screencopy(sock_path)
+            if wlr_img is not None:
+                return wlr_img
+        if ctx and ctx.is_isolated:
+            return None
         return _capture_portal_screenshot_frame()
 
     tmp_path: str | None = None
@@ -135,8 +149,10 @@ def capture_native_desktop_frame() -> Image.Image | None:
             tmp_path = tf.name
 
         cmd = [*cmd_template, tmp_path]
+        run_env = ctx.build_subprocess_env() if ctx else None
         proc = subprocess.run(
             cmd,
+            env=run_env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=3.0,
@@ -153,6 +169,13 @@ def capture_native_desktop_frame() -> Image.Image | None:
             except OSError:
                 pass
 
+    if ctx and ctx.is_isolated:
+        sock_path = ctx.wayland_socket_path()
+        if sock_path:
+            from wayland_computer_use_mcp.blackbox.wlr_wire import capture_wlr_screencopy
+
+            return capture_wlr_screencopy(sock_path)
+        return None
     return _capture_portal_screenshot_frame()
 
 

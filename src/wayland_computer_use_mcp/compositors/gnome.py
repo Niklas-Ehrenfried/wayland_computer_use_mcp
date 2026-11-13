@@ -19,6 +19,7 @@ from wayland_computer_use_mcp.compositors.base import (
     WindowGeometry,
     WindowState,
 )
+from wayland_computer_use_mcp.core.context import get_active_context
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,10 @@ class GnomeBackend(CompositorBackend):
     _warned_introspect: bool = False
 
     async def is_available(self) -> bool:
-        if not os.environ.get("WAYLAND_DISPLAY"):
+        ctx = get_active_context()
+        if ctx and ctx.is_isolated:
+            return False
+        if not ((ctx and ctx.wayland_display) or os.environ.get("WAYLAND_DISPLAY")):
             return False
         desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
         if "gnome" not in desktop:

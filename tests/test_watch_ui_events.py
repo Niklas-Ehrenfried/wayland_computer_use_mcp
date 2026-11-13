@@ -67,9 +67,10 @@ def test_list_managed_apps_tool():
 
 def test_batch_actions_with_per_step_delta(monkeypatch):
     """Verifies batch_actions executes steps and reports status cleanly."""
+    from wayland_computer_use_mcp.config import get_config
     from wayland_computer_use_mcp.portal import global_portal_session
 
-    monkeypatch.setattr(global_portal_session, "_is_mock", True)
+    monkeypatch.setattr(get_config(), "mock_mode", True)
     monkeypatch.setattr(global_portal_session, "dispatch_hover", lambda *args, **kwargs: "Hovered")
     batch = [
         {"action": "wait", "ms": 50},

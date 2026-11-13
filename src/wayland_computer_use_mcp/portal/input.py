@@ -1,133 +1,75 @@
-"""Boundary-clamped input event dispatcher via libei and RemoteDesktop portal."""
+"""Unified clamped input dispatcher operating on InputSink contracts."""
 
 from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, Callable
+from typing import Any, Callable
 
-from wayland_computer_use_mcp.clipboard import (
-    read_system_clipboard,
-    write_system_clipboard,
-)
+from wayland_computer_use_mcp.clipboard import read_system_clipboard, write_system_clipboard
 from wayland_computer_use_mcp.config import get_config
-from wayland_computer_use_mcp.libei import (
-    BTN_LEFT,
-    BTN_MIDDLE,
-    BTN_RIGHT,
-    KEY_LEFTCTRL,
-    KEY_V,
-    EIClient,
-)
-from wayland_computer_use_mcp.security import (
-    global_clamper,
-    global_shortcut_filter,
-)
-
-if TYPE_CHECKING:
-    from wayland_computer_use_mcp.portal.remotedesktop import RemoteDesktopClient
+from wayland_computer_use_mcp.core.context import InputSink
+from wayland_computer_use_mcp.libei import BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, KEY_LEFTCTRL, KEY_V
+from wayland_computer_use_mcp.security import global_clamper, global_shortcut_filter
 
 logger = logging.getLogger(__name__)
 
+_BUTTON_CODES = {
+    "left": BTN_LEFT,
+    "right": BTN_RIGHT,
+    "middle": BTN_MIDDLE,
+}
+
 
 class InputDispatcher:
-    """Dispatches mouse, keyboard, and clipboard interactions with boundary validation
-    and safety checks.
-    """
+    """Dispatches pointer, scroll, keyboard, and clipboard actions via active InputSink."""
 
     def __init__(
         self,
-        rd_client: RemoteDesktopClient,
+        get_sink_fn: Callable[[], InputSink | None],
         verify_preconditions_fn: Callable[[], None],
         get_offsets_fn: Callable[[], tuple[int, int]],
-        is_mock_fn: Callable[[], bool],
-        get_ei_client_fn: Callable[[], EIClient],
     ) -> None:
-        self.rd_client = rd_client
+        self._get_sink = get_sink_fn
         self._verify_preconditions = verify_preconditions_fn
         self._get_offsets = get_offsets_fn
-        self._is_mock = is_mock_fn
-        self._get_ei_client = get_ei_client_fn
 
-    def _apply_action_delay(self) -> None:
-        """Applies configured delay after an action so visual interactions are observable."""
-        cfg = get_config()
-        if cfg.action_delay_seconds > 0:
-            time.sleep(cfg.action_delay_seconds)
+    @staticmethod
+    def _apply_action_delay() -> None:
+        delay = get_config().action_delay_seconds
+        if delay > 0:
+            time.sleep(delay)
 
-    def _has_ei_pointer(self) -> bool:
-        ei = self._get_ei_client()
-        if not ei:
-            return False
-        if getattr(ei, "pointer_abs_device", None):
-            return True
-        pointer_dev = getattr(ei, "pointer_device", None)
-        rel_dev = getattr(ei, "pointer_rel_device", None)
-        return bool(pointer_dev and pointer_dev is not rel_dev)
-
-    def _require_pointer_targetable(self) -> None:
-        """Prevents clicking an unrelated cursor location when only relative EIS exists."""
-        ei = self._get_ei_client()
-        if (
-            get_config().display_mode == "virtual"
-            and isinstance(ei, EIClient)
-            and ei.ctx is None
-            and not getattr(self.rd_client, "session_handle", None)
-        ):
+    def _require_sink(self, *, require_pointer: bool = False) -> InputSink:
+        sink = self._get_sink()
+        if sink is None:
             raise RuntimeError(
-                "Isolated virtual compositor has no EIS pointer device; use semantic "
-                "interact_with_node actions or run with kwin_wayland for coordinate input."
+                "No active input sink available; use semantic interact_with_node actions "
+                "or run with kwin_wayland / labwc / sway for coordinate input."
             )
-        if (
-            isinstance(ei, EIClient)
-            and ei.ctx is not None
-            and not ei.has_absolute_pointer
-            and not getattr(self.rd_client, "pipewire_node_id", None)
-        ):
-            raise RuntimeError(
-                "Cannot move pointer to absolute coordinates: compositor EIS only provided "
-                "a relative pointer without a ScreenCast stream. Share a screen or window "
-                "in the OS portal permission prompt to enable absolute pointer control."
-            )
+        if require_pointer and not getattr(sink, "has_absolute_pointer", False):
+            # Allow HostInputSink to attempt its RemoteDesktop fallback or raise explicit error
+            from wayland_computer_use_mcp.compat.host_driver import HostInputSink
 
-    def _has_ei_keyboard(self) -> bool:
-        ei = self._get_ei_client()
-        return bool(ei and ei.keyboard_device)
-
-    def _has_ei_scroll(self) -> bool:
-        ei = self._get_ei_client()
-        return bool(ei and ei.scroll_device)
+            if not isinstance(sink, HostInputSink):
+                raise RuntimeError(
+                    "Isolated virtual compositor has no pointer input sink; use semantic "
+                    "interact_with_node actions or run with kwin_wayland / labwc / sway "
+                    "for coordinate input."
+                )
+        return sink
 
     def dispatch_click(self, x: int, y: int, button: str = "left") -> str:
         """Validates bounds and executes mouse click."""
         self._verify_preconditions()
         cx, cy = global_clamper.validate_and_clamp(x, y)
-        if self._is_mock():
-            return f"Clicked {button} button at ({cx}, {cy})"
-
-        btn_map = {
-            "left": BTN_LEFT,
-            "right": BTN_RIGHT,
-            "middle": BTN_MIDDLE,
-        }
-        button_code = btn_map.get(button.lower(), BTN_LEFT)
+        sink = self._require_sink(require_pointer=True)
+        button_code = _BUTTON_CODES.get(button.lower(), BTN_LEFT)
         offset_x, offset_y = self._get_offsets()
-        target_x = float(offset_x + cx)
-        target_y = float(offset_y + cy)
 
-        if self._has_ei_pointer():
-            ei_client = self._get_ei_client()
-            ei_client.pointer_motion_absolute(target_x, target_y)
-            time.sleep(0.005)
-            ei_client.button_click(button_code)
-        else:
-            self._require_pointer_targetable()
-            self.rd_client.notify_pointer_motion_absolute(target_x, target_y)
-            time.sleep(0.005)
-            self.rd_client.notify_pointer_button(button_code, True)
-            time.sleep(0.008)
-            self.rd_client.notify_pointer_button(button_code, False)
-
+        sink.pointer_motion_absolute(float(offset_x + cx), float(offset_y + cy))
+        time.sleep(0.005)
+        sink.button_click(button_code)
         self._apply_action_delay()
         return f"Clicked {button} button at ({cx}, {cy})"
 
@@ -135,34 +77,13 @@ class InputDispatcher:
         """Performs a clamped double-click."""
         self._verify_preconditions()
         cx, cy = global_clamper.validate_and_clamp(x, y)
-        if self._is_mock():
-            return f"Double-clicked {button} button at ({cx}, {cy})"
-
-        btn_map = {
-            "left": BTN_LEFT,
-            "right": BTN_RIGHT,
-            "middle": BTN_MIDDLE,
-        }
-        button_code = btn_map.get(button.lower(), BTN_LEFT)
+        sink = self._require_sink(require_pointer=True)
+        button_code = _BUTTON_CODES.get(button.lower(), BTN_LEFT)
         offset_x, offset_y = self._get_offsets()
-        target_x = float(offset_x + cx)
-        target_y = float(offset_y + cy)
 
-        if self._has_ei_pointer():
-            ei_client = self._get_ei_client()
-            ei_client.pointer_motion_absolute(target_x, target_y)
-            time.sleep(0.005)
-            ei_client.double_click(button_code)
-        else:
-            self._require_pointer_targetable()
-            self.rd_client.notify_pointer_motion_absolute(target_x, target_y)
-            time.sleep(0.005)
-            self.rd_client.notify_pointer_button(button_code, True)
-            self.rd_client.notify_pointer_button(button_code, False)
-            time.sleep(0.04)
-            self.rd_client.notify_pointer_button(button_code, True)
-            self.rd_client.notify_pointer_button(button_code, False)
-
+        sink.pointer_motion_absolute(float(offset_x + cx), float(offset_y + cy))
+        time.sleep(0.005)
+        sink.double_click(button_code)
         self._apply_action_delay()
         return f"Double-clicked {button} button at ({cx}, {cy})"
 
@@ -171,23 +92,13 @@ class InputDispatcher:
         return self.dispatch_click(x, y, button="right")
 
     def dispatch_hover(self, x: int, y: int, duration_ms: int = 200) -> str:
-        """Positions cursor at coordinates without clicking to trigger hover states or tooltips."""
+        """Positions cursor at coordinates without clicking to trigger hover states."""
         self._verify_preconditions()
         cx, cy = global_clamper.validate_and_clamp(x, y)
-        if self._is_mock():
-            return f"Hovered pointer at ({cx}, {cy}) for {duration_ms}ms"
-
+        sink = self._require_sink(require_pointer=True)
         offset_x, offset_y = self._get_offsets()
-        target_x = float(offset_x + cx)
-        target_y = float(offset_y + cy)
 
-        if self._has_ei_pointer():
-            ei_client = self._get_ei_client()
-            ei_client.pointer_motion_absolute(target_x, target_y)
-        else:
-            self._require_pointer_targetable()
-            self.rd_client.notify_pointer_motion_absolute(target_x, target_y)
-
+        sink.pointer_motion_absolute(float(offset_x + cx), float(offset_y + cy))
         if duration_ms > 0:
             time.sleep(duration_ms / 1000.0)
         self._apply_action_delay()
@@ -198,103 +109,58 @@ class InputDispatcher:
         self._verify_preconditions()
         s_x, s_y = global_clamper.validate_and_clamp(start_x, start_y)
         e_x, e_y = global_clamper.validate_and_clamp(end_x, end_y)
-        if self._is_mock():
-            return f"Dragged from ({s_x}, {s_y}) to ({e_x}, {e_y})"
-
+        sink = self._require_sink(require_pointer=True)
         offset_x, offset_y = self._get_offsets()
-        s_target_x = float(offset_x + s_x)
-        s_target_y = float(offset_y + s_y)
-        e_target_x = float(offset_x + e_x)
-        e_target_y = float(offset_y + e_y)
 
+        sx, sy = float(offset_x + s_x), float(offset_y + s_y)
+        ex, ey = float(offset_x + e_x), float(offset_y + e_y)
         steps = 4
-        if self._has_ei_pointer():
-            ei_client = self._get_ei_client()
-            ei_client.pointer_motion_absolute(s_target_x, s_target_y)
-            time.sleep(0.01)
-            ei_client.button_down(BTN_LEFT)
-            time.sleep(0.01)
 
-            for i in range(1, steps + 1):
-                cur_x = s_target_x + (e_target_x - s_target_x) * (i / steps)
-                cur_y = s_target_y + (e_target_y - s_target_y) * (i / steps)
-                ei_client.pointer_motion_absolute(cur_x, cur_y)
-                time.sleep(0.005)
-
-            time.sleep(0.01)
-            ei_client.button_up(BTN_LEFT)
-        else:
-            self._require_pointer_targetable()
-            self.rd_client.notify_pointer_motion_absolute(s_target_x, s_target_y)
-            time.sleep(0.01)
-            self.rd_client.notify_pointer_button(BTN_LEFT, True)
-            time.sleep(0.01)
-
-            for i in range(1, steps + 1):
-                cur_x = s_target_x + (e_target_x - s_target_x) * (i / steps)
-                cur_y = s_target_y + (e_target_y - s_target_y) * (i / steps)
-                self.rd_client.notify_pointer_motion_absolute(cur_x, cur_y)
-                time.sleep(0.005)
-
-            time.sleep(0.01)
-            self.rd_client.notify_pointer_button(BTN_LEFT, False)
-
+        sink.pointer_motion_absolute(sx, sy)
+        time.sleep(0.01)
+        sink.button_down(BTN_LEFT)
+        time.sleep(0.01)
+        for i in range(1, steps + 1):
+            cur_x = sx + (ex - sx) * (i / steps)
+            cur_y = sy + (ey - sy) * (i / steps)
+            sink.pointer_motion_absolute(cur_x, cur_y)
+            time.sleep(0.005)
+        time.sleep(0.01)
+        sink.button_up(BTN_LEFT)
         self._apply_action_delay()
         return f"Dragged from ({s_x}, {s_y}) to ({e_x}, {e_y})"
 
     def dispatch_scroll(self, dx: int, dy: int) -> str:
         """Dispatches scroll deltas."""
         self._verify_preconditions()
-        if self._is_mock():
-            return f"Scrolled dx={dx}, dy={dy}"
-
-        if self._has_ei_scroll():
-            try:
-                self._get_ei_client().scroll(float(dx), float(dy))
-            except Exception as exc:
-                logger.warning("EI scroll failed, falling back to RemoteDesktop: %s", exc)
-                self.rd_client.notify_pointer_axis(float(dx), float(dy))
-        else:
-            self.rd_client.notify_pointer_axis(float(dx), float(dy))
-
+        sink = self._require_sink(require_pointer=False)
+        sink.scroll(float(dx), float(dy))
         self._apply_action_delay()
         return f"Scrolled dx={dx}, dy={dy}"
 
     def dispatch_type_text(self, text: str, x: int | None = None, y: int | None = None) -> str:
-        """Types text via hybrid fast key events + clipboard paste fallback.
-
-        If x and y coordinates are provided, dispatches a click at (x, y) first to ensure focus.
-        Short strings (<= 30 chars without newlines) simulate fast key typing for visual display.
-        Longer or multiline strings use automatic clipboard paste for instant, reliable transfer.
-        """
+        """Types text via hybrid fast key events + clipboard paste fallback."""
         self._verify_preconditions()
         prefix = ""
         if x is not None and y is not None:
             prefix = self.dispatch_click(x, y, button="left") + ". "
             time.sleep(0.015)
 
-        if self._is_mock():
-            return f"{prefix}Typed {len(text)} characters"
-
-        ei_client = self._get_ei_client()
-
-        # Clipboard paste for long/multiline text or unmapped layout/Unicode chars
-        can_type = ei_client.can_type_text(text) if hasattr(ei_client, "can_type_text") else True
-        if len(text) > 30 or "\n" in text or not can_type:
-            if self._paste_clipboard_text(text):
+        sink = self._require_sink(require_pointer=False)
+        if len(text) > 30 or "\n" in text or not sink.can_type_text(text):
+            if self._paste_clipboard_text(sink, text):
                 self._apply_action_delay()
                 return f"{prefix}Pasted {len(text)} characters via clipboard"
 
-        # Fast keystroke injection without artificial human-typing slowdown
-        can_type_pure = True
+        typed_ok = True
         for char in text:
-            if not ei_client.type_char(char):
-                can_type_pure = False
+            if not sink.type_char(char):
+                typed_ok = False
                 break
             time.sleep(0.002)
 
-        if not can_type_pure:
-            self._paste_clipboard_text(text)
+        if not typed_ok:
+            self._paste_clipboard_text(sink, text)
 
         self._apply_action_delay()
         return f"{prefix}Typed {len(text)} characters"
@@ -303,70 +169,48 @@ class InputDispatcher:
         """Dispatches key combination while strictly blocking system shortcuts."""
         self._verify_preconditions()
         keycodes = global_shortcut_filter.validate_and_resolve(keys)
-        if self._is_mock():
-            return f"Dispatched key combination: {'+'.join(keys)}"
+        sink = self._require_sink(require_pointer=False)
 
-        ei_client = self._get_ei_client()
-        resolved_fn = getattr(ei_client, "resolve_key_name", None)
-        if callable(resolved_fn):
-            updated: list[int] = []
-            for k, code in zip(keys, keycodes, strict=True):
-                stripped = k.strip()
-                mapped = resolved_fn(stripped) if len(stripped) == 1 else None
-                updated.append(mapped if isinstance(mapped, int) else code)
-            keycodes = updated
-        ei_client.key_combination(keycodes)
+        updated: list[int] = []
+        for k, code in zip(keys, keycodes, strict=True):
+            stripped = k.strip()
+            mapped = sink.resolve_key_name(stripped) if len(stripped) == 1 else None
+            updated.append(mapped if isinstance(mapped, int) else code)
+
+        sink.key_combination(updated)
         self._apply_action_delay()
         return f"Dispatched key combination: {'+'.join(keys)}"
 
     def dispatch_clipboard_read(self) -> str:
-        """Reads current text from the system clipboard via available backends."""
+        """Reads current text from the system clipboard via active backends."""
         self._verify_preconditions()
-        if self._is_mock():
-            return ""
-
         return read_system_clipboard()
 
     def dispatch_clipboard_write(self, text: str) -> str:
-        """Writes text into the system clipboard via available backends."""
+        """Writes text into the system clipboard via active backends."""
         self._verify_preconditions()
-        if self._is_mock():
-            return f"Copied {len(text)} characters to clipboard."
-
-        success = write_system_clipboard(text)
-        if success:
+        if write_system_clipboard(text):
             return f"Copied {len(text)} characters to clipboard."
         return "Failed to write to clipboard: no supported clipboard backend available"
 
-    def _paste_clipboard_text(self, text: str) -> bool:
-        """Copies text to clipboard using available backend and sends Ctrl+V."""
+    def _paste_clipboard_text(self, sink: InputSink, text: str) -> bool:
+        """Copies text to clipboard and presses Ctrl+V through the active InputSink."""
         try:
             if not write_system_clipboard(text):
                 return False
             time.sleep(0.015)
-            if self._has_ei_keyboard():
-                ei_client = self._get_ei_client()
-                v_code = (
-                    ei_client.resolve_key_name("v")
-                    if hasattr(ei_client, "resolve_key_name")
-                    else None
-                ) or KEY_V
-                ei_client.key_press(KEY_LEFTCTRL, True)
-                time.sleep(0.005)
-                ei_client.key_press(v_code, True)
-                time.sleep(0.005)
-                ei_client.key_press(v_code, False)
-                time.sleep(0.005)
-                ei_client.key_press(KEY_LEFTCTRL, False)
-            else:
-                self.rd_client.notify_keyboard_keycode(KEY_LEFTCTRL, True)
-                time.sleep(0.005)
-                self.rd_client.notify_keyboard_keycode(KEY_V, True)
-                time.sleep(0.005)
-                self.rd_client.notify_keyboard_keycode(KEY_V, False)
-                time.sleep(0.005)
-                self.rd_client.notify_keyboard_keycode(KEY_LEFTCTRL, False)
+            v_code = sink.resolve_key_name("v") or KEY_V
+            sink.key_press(KEY_LEFTCTRL, True)
+            time.sleep(0.005)
+            sink.key_press(v_code, True)
+            time.sleep(0.005)
+            sink.key_press(v_code, False)
+            time.sleep(0.005)
+            sink.key_press(KEY_LEFTCTRL, False)
             return True
         except Exception as exc:
             logger.warning("Clipboard paste fallback failed: %s", exc)
             return False
+
+
+__all__ = ["Any", "InputDispatcher"]

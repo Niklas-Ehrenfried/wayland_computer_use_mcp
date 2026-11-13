@@ -1,28 +1,25 @@
-"""Portal session orchestrator coordinating screencast, remotedesktop, and input."""
+"""Lean session coordinator routing between Blackbox, HostPassthrough, and Mock drivers."""
 
 from __future__ import annotations
 
 import logging
 import os
-import subprocess
 import threading
 import time
 from typing import Any
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
+from wayland_computer_use_mcp.artifacts import get_artifacts_dir
+from wayland_computer_use_mcp.blackbox.driver import BlackboxDriver
+from wayland_computer_use_mcp.compat.host_driver import HostPassthroughDriver
 from wayland_computer_use_mcp.config import get_config
-from wayland_computer_use_mcp.libei import EIClient
+from wayland_computer_use_mcp.core.context import get_active_context, set_active_context
+from wayland_computer_use_mcp.core.driver import SessionDriver
+from wayland_computer_use_mcp.core.mock_driver import MockSessionDriver
 from wayland_computer_use_mcp.portal.input import InputDispatcher
-from wayland_computer_use_mcp.portal.remotedesktop import (
-    AsyncLoopThread,
-    RemoteDesktopClient,
-)
-from wayland_computer_use_mcp.portal.screencast import (
-    ScreenCastPipeline,
-    crop_element,
-)
-from wayland_computer_use_mcp.portal.virtual import VirtualSessionManager, _terminate_proc_group
+from wayland_computer_use_mcp.portal.remotedesktop import AsyncLoopThread
+from wayland_computer_use_mcp.portal.screencast import crop_element
 from wayland_computer_use_mcp.security import (
     global_clamper,
     global_geometry_detector,
@@ -33,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 class PortalSession:
-    """Manages active ScreenCast and RemoteDesktop session via XDG portals and PipeWire."""
+    """Coordinates active SessionDriver, input clamping, frame capture, and teardown."""
 
     def __init__(self) -> None:
         self.active_app_id: str = "default"
@@ -41,92 +38,48 @@ class PortalSession:
         self.target_title: str | None = None
         self.window_offset_x: int = 0
         self.window_offset_y: int = 0
+        self.last_saved_frame_path: str | None = None
         self.last_saved_labeled_path: str | None = None
 
         self._async_thread = AsyncLoopThread()
-        self._rd_client = RemoteDesktopClient(self._async_thread)
-        self._screencast = ScreenCastPipeline()
-        self._input = InputDispatcher(
-            rd_client=self._rd_client,
-            verify_preconditions_fn=self._verify_preconditions,
-            get_offsets_fn=lambda: (self.window_offset_x, self.window_offset_y),
-            is_mock_fn=lambda: self.is_mock,
-            get_ei_client_fn=self._get_or_create_ei_client,
-        )
+        self._blackbox = BlackboxDriver()
+        self._host = HostPassthroughDriver(self._async_thread)
+        self._mock = MockSessionDriver()
 
         self._lock = threading.Lock()
         self._initialized = False
-        self._is_mock = False
-        self._last_portal_error: str | None = None
-        self._virtual_env = VirtualSessionManager()
-        self._virtual_proc: subprocess.Popen[Any] | None = None
+        self._last_error: str | None = None
+        self._last_frame: Image.Image | None = None
 
-    @property
-    def bus(self) -> Any:
-        return self._rd_client.bus
+        self._input = InputDispatcher(
+            get_sink_fn=lambda: self.active_driver().get_input_sink(),
+            verify_preconditions_fn=self._verify_preconditions,
+            get_offsets_fn=lambda: (self.window_offset_x, self.window_offset_y),
+        )
 
-    @property
-    def session_handle(self) -> str | None:
-        return self._rd_client.session_handle
-
-    @session_handle.setter
-    def session_handle(self, val: str | None) -> None:
-        self._rd_client.session_handle = val
-
-    @property
-    def pipewire_node_id(self) -> int | None:
-        return self._rd_client.pipewire_node_id
-
-    @pipewire_node_id.setter
-    def pipewire_node_id(self, val: int | None) -> None:
-        self._rd_client.pipewire_node_id = val
-
-    @property
-    def eis_fd(self) -> int | None:
-        return self._rd_client.eis_fd
-
-    @eis_fd.setter
-    def eis_fd(self, val: int | None) -> None:
-        self._rd_client.eis_fd = val
-
-    @property
-    def ei_client(self) -> EIClient | None:
-        return self._rd_client.ei_client
-
-    @ei_client.setter
-    def ei_client(self, val: EIClient | None) -> None:
-        self._rd_client.ei_client = val
-
-    @property
-    def restore_token(self) -> str | None:
-        return self._rd_client.restore_token
-
-    @restore_token.setter
-    def restore_token(self, val: str | None) -> None:
-        self._rd_client.restore_token = val
-
-    @property
-    def last_saved_frame_path(self) -> str | None:
-        return self._screencast.last_saved_frame_path
+    def active_driver(self) -> SessionDriver:
+        """Selects the active driver: Mock (test/no-display), Blackbox (primary), or Host."""
+        cfg = get_config()
+        if cfg.mock_mode:
+            return self._mock
+        if cfg.display_mode == "virtual" or self._blackbox.is_active():
+            return self._blackbox
+        ctx = get_active_context()
+        has_display = bool((ctx and ctx.wayland_display) or os.environ.get("WAYLAND_DISPLAY"))
+        if not has_display:
+            return self._mock
+        return self._host
 
     @property
     def is_mock(self) -> bool:
-        return (
-            self._is_mock
-            or self.pipewire_node_id == 99999
-            or get_config().mock_mode
-            or not os.environ.get("WAYLAND_DISPLAY")
-        )
+        return self.active_driver() is self._mock
 
-    def _get_or_create_ei_client(self) -> EIClient:
-        if not self._rd_client.ei_client:
-            self._rd_client.ei_client = EIClient(fd=None)
-        return self._rd_client.ei_client
+    def metadata(self) -> dict[str, Any]:
+        """Returns active driver metadata (session_handle, adapter, eis_connected, etc.)."""
+        return self.active_driver().metadata()
 
     def is_active(self) -> bool:
-        return self._initialized and (
-            self.pipewire_node_id is not None or self.is_mock or self._virtual_env.is_running
-        )
+        return self._initialized and self.active_driver().is_active()
 
     def check_active_app(self, pid: int | None = None) -> None:
         """Verifies that an application process is actively running and responsive."""
@@ -135,8 +88,8 @@ class PortalSession:
         effective_pid = pid or self.target_pid
         if not effective_pid:
             raise RuntimeError(
-                "No active managed application. "
-                "Please launch an application first using launch_app."
+                "No active managed application. Please launch an application first using "
+                "launch_app."
             )
         from wayland_computer_use_mcp.process import is_responsive
 
@@ -147,88 +100,58 @@ class PortalSession:
             )
 
     def ensure_initialized(self, app_id: str | None = None) -> None:
-        """Synchronously ensures session is initialized using the persistent async thread."""
+        """Synchronously ensures the selected SessionDriver is initialized."""
         with self._lock:
-            if self._initialized:
+            if self._initialized and self.active_driver().is_active():
                 return
         self._async_thread.run(self.initialize(app_id=app_id))
 
     async def initialize(self, app_id: str | None = None) -> None:
-        """Initialize or restore ScreenCast and RemoteDesktop portal session."""
+        """Initializes the active SessionDriver (Mock, Blackbox, or HostPassthrough)."""
+        self.active_app_id = app_id or "default"
+        driver = self.active_driver()
         with self._lock:
-            if self._initialized:
+            if self._initialized and driver.is_active():
                 return
 
-        cfg = get_config()
-        self.active_app_id = app_id or "default"
-
-        # Isolated virtual / Playwright-style nested window mode
-        if cfg.display_mode == "virtual" and not cfg.mock_mode:
-            self._ensure_virtual_compositor()
-            eis_fd, backend_kind = await self._virtual_env.connect_direct_eis()
-            if eis_fd is not None:
-                self._rd_client.eis_fd = eis_fd
-                self._rd_client.ei_client = EIClient(fd=eis_fd)
-            elif self._rd_client.ei_client is None:
-                self._rd_client.ei_client = EIClient(fd=None)
-            self._initialized = True
-            logger.info(
-                "Initialized isolated virtual session (backend=%s, eis=%s)",
-                backend_kind,
-                eis_fd is not None,
-            )
-            return
-
-        # If mock mode or test environment without Wayland display
-        if cfg.mock_mode or not os.environ.get("WAYLAND_DISPLAY"):
-            logger.info("Initializing portal session in mock/emulated mode.")
-            self._init_mock_session()
-            return
-
-        self._last_portal_error = None
+        self._last_error = None
         try:
-            _, node_id, _, _ = await self._rd_client.negotiate(self.active_app_id)
-            if node_id:
-                self._screencast.setup_pipeline(node_id)
+            await driver.initialize(self.active_app_id)
+            set_active_context(driver.context())
             self._initialized = True
         except Exception as exc:
             import traceback
 
             err_detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
-            self._last_portal_error = f"{err_detail} | {traceback.format_exc()}"
-            logger.warning("Portal D-Bus negotiation failed: %s", err_detail)
-            if cfg.mock_mode or isinstance(exc, FileNotFoundError):
-                logger.info("D-Bus socket unavailable; using mock session.")
-                self._init_mock_session()
+            self._last_error = f"{err_detail} | {traceback.format_exc()}"
+            logger.warning("Session driver (%s) initialization failed: %s", driver.name, err_detail)
+            if isinstance(exc, FileNotFoundError) and driver is self._host:
+                logger.info("D-Bus socket unavailable; activating MockSessionDriver.")
+                self._mock.activate_sync()
+                set_active_context(self._mock.context())
+                self._initialized = True
             else:
                 self._initialized = False
-                raise RuntimeError(
-                    f"RemoteDesktop / ScreenCast portal negotiation failed: {err_detail}. "
-                    "Please ensure the OS permission prompt was allowed."
-                ) from exc
+                if driver is self._host:
+                    raise RuntimeError(
+                        f"RemoteDesktop / ScreenCast portal negotiation failed: {err_detail}. "
+                        "Please ensure the OS permission prompt was allowed."
+                    ) from exc
+                raise
 
-    def _ensure_virtual_compositor(self) -> None:
-        """Verify or spawn a cross-DE isolated virtual/nested Wayland compositor."""
-        cfg = get_config()
-        self._virtual_env.ensure_started(cfg)
-        self._virtual_proc = self._virtual_env.compositor_proc
-
-    def _init_mock_session(self) -> None:
-        """Initialize mock session for CI and testing."""
-        self._initialized = True
-        self._is_mock = True
-        self.pipewire_node_id = 99999
-        self.ei_client = EIClient(fd=None)
-        img = Image.new("RGBA", (1920, 1080), color=(45, 52, 54, 255))
-        draw = ImageDraw.Draw(img)
-        draw.rectangle([50, 50, 600, 400], fill=(9, 132, 227, 255), outline=(255, 255, 255, 255))
-        draw.text((70, 70), "wayland-computer-use-mcp Mock Surface", fill=(255, 255, 255, 255))
-        self._screencast._last_frame = img
-        global_clamper.set_bounds(1920, 1080)
-        global_geometry_detector.record_capture(1920, 1080)
+    def _ensure_host_portal_ready(self) -> None:
+        """Promotes lazy host passthrough to portal control on visual/physical use."""
+        driver = self.active_driver()
+        if (
+            driver is self._host
+            and get_config().lazy_portal
+            and self._host.rd_client.pipewire_node_id is None
+        ):
+            self._host.ensure_dialogs_above()
+            self._async_thread.run(self._host.ensure_portal_negotiated(self.active_app_id))
 
     def _resolve_target_title(self) -> str | None:
-        """Resolves target window title from AT-SPI accessible tree if not already set."""
+        """Resolves target window title from AT-SPI accessible tree if unset."""
         if self.target_title:
             return self.target_title
         if not self.target_pid:
@@ -241,46 +164,41 @@ class PortalSession:
                 if child.get("role") in ("window", "frame") and child.get("name"):
                     self.target_title = child.get("name")
                     return self.target_title
-            name = tree.get("name", "")
-            if name and not name.endswith(".py"):
-                self.target_title = name
-                return self.target_title
-            return None
         except Exception:
-            return None
+            pass
+        return None
 
     @staticmethod
     def _extract_tree_window_bounds(tree: dict[str, Any]) -> tuple[int, int, int, int] | None:
-        """Extracts positive window geometry from an AT-SPI tree root or top-level frame child."""
-        candidates: list[dict[str, Any]] = [tree]
+        """Extracts non-zero [x, y, w, h] window bounds from AT-SPI application tree."""
+
+        def _valid(b: Any) -> tuple[int, int, int, int] | None:
+            if isinstance(b, list) and len(b) == 4 and b[2] > 0 and b[3] > 0:
+                return int(b[0]), int(b[1]), int(b[2]), int(b[3])
+            return None
+
+        root_bounds = _valid(tree.get("bounds"))
+        if root_bounds:
+            return root_bounds
         for child in tree.get("children", []):
-            if isinstance(child, dict) and str(child.get("role", "")).lower() in (
-                "frame",
-                "window",
-                "dialog",
-            ):
-                candidates.append(child)
-        for node in candidates:
-            sb = node.get("screen_bounds") or node.get("bounds")
-            if sb and len(sb) >= 4 and int(sb[2]) > 0 and int(sb[3]) > 0:
-                return (max(0, int(sb[0])), max(0, int(sb[1])), int(sb[2]), int(sb[3]))
+            if child.get("role") in ("window", "frame"):
+                c_bounds = _valid(child.get("bounds"))
+                if c_bounds:
+                    return c_bounds
         return None
 
     def _resolve_target_geometry(self) -> tuple[int, int, int, int] | None:
-        """Resolves active target window geometry via compositor D-Bus or AT-SPI fallback."""
+        """Resolves active target window geometry via driver compositor or AT-SPI fallback."""
         if not self.target_pid:
             return None
-        from wayland_computer_use_mcp.compositors import query_window_geometry
-
         title = self._resolve_target_title()
-        geom = query_window_geometry(pid=self.target_pid, title=title)
+        geom = self.active_driver().query_window_geometry(pid=self.target_pid, title=title)
         if geom:
             return geom
         try:
             from wayland_computer_use_mcp.a11y import get_application_tree
 
-            tree = get_application_tree(self.target_pid)
-            return self._extract_tree_window_bounds(tree)
+            return self._extract_tree_window_bounds(get_application_tree(self.target_pid))
         except Exception:
             return None
 
@@ -292,39 +210,43 @@ class PortalSession:
     ) -> Image.Image:
         """Retrieves the latest video frame as a PIL.Image, updating bounds and cropping."""
         self.check_active_app()
+        driver = self.active_driver()
         if not self._initialized:
-            cfg = get_config()
-            if cfg.mock_mode or not os.environ.get("WAYLAND_DISPLAY"):
-                self._init_mock_session()
+            if driver is self._mock:
+                self._mock.activate_sync()
+                self._initialized = True
             else:
                 raise RuntimeError(
-                    "Portal session is not initialized. "
-                    + (f"Last error: {self._last_portal_error}" if self._last_portal_error else "")
+                    "Session is not initialized. "
+                    + (f"Last error: {self._last_error}" if self._last_error else "")
                 )
 
-        geom = self._resolve_target_geometry()
-        if geom:
-            wx, wy, ww, wh = geom
-            self.window_offset_x = wx
-            self.window_offset_y = wy
-            global_clamper.set_bounds(ww, wh)
-            global_geometry_detector.record_capture(ww, wh, wx, wy)
-            time.sleep(0.05)
+        if driver is self._mock:
+            geom = None
+        else:
+            geom = self._resolve_target_geometry()
+            if geom:
+                wx, wy, ww, wh = geom
+                self.window_offset_x = wx
+                self.window_offset_y = wy
+                global_clamper.set_bounds(ww, wh)
+                global_geometry_detector.record_capture(ww, wh, wx, wy)
+                time.sleep(0.05)
 
-        frame = self._screencast.pull_frame()
+        self._ensure_host_portal_ready()
+        frame = driver.capture_output_frame()
         if frame is None:
-            if self._screencast._last_frame is not None:
-                frame = self._screencast._last_frame.copy()
+            if self._last_frame is not None:
+                frame = self._last_frame.copy()
             else:
                 frame = Image.new("RGBA", (1920, 1080), color=(40, 44, 52, 255))
 
-        self._screencast._last_frame = frame
+        self._last_frame = frame
 
         if not self.target_pid or not geom:
             global_clamper.set_bounds(frame.width, frame.height)
             global_geometry_detector.record_capture(frame.width, frame.height, 0, 0)
 
-        result_frame: Image.Image
         if crop_box:
             result_frame = crop_element(frame, *crop_box)
         elif self.target_pid and geom:
@@ -334,17 +256,15 @@ class PortalSession:
             result_frame = frame
 
         if save_to_disk:
-            self._screencast.save_frame(result_frame, filename=filename)
+            try:
+                frame_path = get_artifacts_dir("screenshots") / filename
+                result_frame.save(frame_path)
+                self.last_saved_frame_path = str(frame_path)
+            except Exception as exc:
+                logger.debug("Failed to save frame: %s", exc)
         return result_frame
 
-    def crop_element(
-        self,
-        frame: Image.Image,
-        x: int,
-        y: int,
-        w: int,
-        h: int,
-    ) -> Image.Image:
+    def crop_element(self, frame: Image.Image, x: int, y: int, w: int, h: int) -> Image.Image:
         """Crops the frame to requested bounds [x, y, w, h] clamped to surface boundaries."""
         return crop_element(frame, x, y, w, h)
 
@@ -358,6 +278,7 @@ class PortalSession:
         self.check_active_app()
         if not self._initialized:
             self.ensure_initialized()
+        self._ensure_host_portal_ready()
         global_preemption_manager.check_preemption()
         if not self.target_pid:
             raise RuntimeError(
@@ -365,7 +286,6 @@ class PortalSession:
                 "Action blocked to prevent unintended desktop interaction."
             )
         geom = self._resolve_target_geometry()
-
         if not geom:
             raise RuntimeError(
                 f"Target application window (PID {self.target_pid}) "
@@ -380,7 +300,6 @@ class PortalSession:
         self.window_offset_y = wy
         global_clamper.set_bounds(ww, wh)
 
-    # Delegation to InputDispatcher
     def dispatch_click(self, x: int, y: int, button: str = "left") -> str:
         return self._input.dispatch_click(x, y, button=button)
 
@@ -412,9 +331,8 @@ class PortalSession:
         return self._input.dispatch_clipboard_write(text)
 
     def _stop_session_resources(self) -> None:
-        """Closes screencast, remote desktop/EIS, AT-SPI listeners, and virtual compositor."""
-        self._screencast.stop()
-        self._rd_client.close()
+        """Closes host portal, AT-SPI listeners, blackbox sandbox, and mock state."""
+        self._host.close()
         try:
             from wayland_computer_use_mcp.a11y import close_atspi_pool, global_event_listener
 
@@ -422,21 +340,19 @@ class PortalSession:
             close_atspi_pool()
         except Exception:
             pass
-        self._virtual_env.stop()
-        if self._virtual_proc is not None:
-            _terminate_proc_group(self._virtual_proc)
-            self._virtual_proc = None
+        self._blackbox.close()
+        self._mock.close()
+        set_active_context(None)
         self._initialized = False
 
     def close_virtual_if_idle(self) -> bool:
         """Tears down the isolated virtual window when no managed apps remain."""
-        cfg = get_config()
-        if cfg.display_mode != "virtual" and not self._virtual_env.is_running:
+        if get_config().display_mode != "virtual" and not self._blackbox.is_active():
             return False
         self._stop_session_resources()
         return True
 
     def close(self) -> None:
-        """Cleans up active screencast pipeline, remote desktop, libei, and event listeners."""
+        """Cleans up active session drivers, event listeners, and async thread."""
         self._stop_session_resources()
         self._async_thread.stop()

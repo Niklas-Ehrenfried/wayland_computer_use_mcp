@@ -65,7 +65,12 @@ def _consume_stream(stream: Any, log_deque: collections.deque[str]) -> None:
             pass
 
 
-def launch(target_script: str, args: list[str] | None = None, cwd: str | None = None) -> int:
+def launch(
+    target_script: str,
+    args: list[str] | None = None,
+    cwd: str | None = None,
+    env: dict[str, str] | None = None,
+) -> int:
     """Launches a script/application using auto-detected Python runtime.
 
     Spawns process with stdout=PIPE, stderr=PIPE, runs a background reader thread
@@ -96,15 +101,21 @@ def launch(target_script: str, args: list[str] | None = None, cwd: str | None = 
 
     work_dir = cwd or str(script_path.parent)
 
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-    env["GTK_MODULES"] = "gail:atk-bridge"
-    env["QT_LINUX_ACCESSIBILITY_ALWAYS_ON"] = "1"
+    if env is not None:
+        proc_env = dict(env)
+    else:
+        from wayland_computer_use_mcp.core.context import get_active_context
+
+        ctx = get_active_context()
+        proc_env = ctx.build_subprocess_env() if ctx is not None else os.environ.copy()
+    proc_env["PYTHONUNBUFFERED"] = "1"
+    proc_env["GTK_MODULES"] = "gail:atk-bridge"
+    proc_env["QT_LINUX_ACCESSIBILITY_ALWAYS_ON"] = "1"
 
     proc = subprocess.Popen(
         cmd,
         cwd=work_dir,
-        env=env,
+        env=proc_env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -122,7 +133,7 @@ def launch(target_script: str, args: list[str] | None = None, cwd: str | None = 
             "args": list(args),
             "cwd": cwd,
             "cmd": cmd,
-            "env": env,
+            "env": proc_env,
         }
 
     # Start reader threads for both stdout and stderr so neither pipe can deadlock

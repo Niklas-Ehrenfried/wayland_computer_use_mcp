@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
-DEFAULT_VIRTUAL_CMD = "weston --backend=headless-backend.so"
+DEFAULT_VIRTUAL_CMD = "auto"
 
 CONFIG_DIR = Path.home() / ".config" / "wayland-computer-use-mcp"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -49,6 +48,9 @@ class Config:
 
     # Optional extra pause after physical mouse/keyboard actions (seconds)
     action_delay_seconds: float = 0.0
+
+    # Defer XDG RemoteDesktop/ScreenCast portal prompts in live mode until visual/physical use
+    lazy_portal: bool = False
 
     @classmethod
     def load(cls) -> Config:
@@ -130,6 +132,9 @@ class Config:
             except ValueError:
                 pass
 
+        if os.environ.get("WAYLAND_MCP_LAZY_PORTAL", "").strip().lower() in ("1", "true", "yes"):
+            config.lazy_portal = True
+
         return config
 
     def apply_cli_args(self, args: list[str]) -> list[str]:
@@ -187,6 +192,8 @@ class Config:
                 self.mock_mode = True
             elif arg == "--enable-desktop-installer":
                 self.enable_desktop_installer = True
+            elif arg == "--lazy-portal":
+                self.lazy_portal = True
             else:
                 remaining.append(arg)
         return remaining
@@ -229,51 +236,6 @@ Environment Variables:
   WAYLAND_MCP_SAVE_FRAMES_DIR          Directory to persist screenshots
   WAYLAND_MCP_ENABLE_DESKTOP_INSTALLER Set '1' to enable desktop shortcut tools
 """
-
-
-def detect_virtual_compositor_cmd(
-    *,
-    headed: bool,
-    socket_name: str,
-    width: int = 1280,
-    height: int = 800,
-    explicit_cmd: str = DEFAULT_VIRTUAL_CMD,
-    host_wayland_display: str | None = None,
-) -> str:
-    """Resolves a cross-DE Wayland nested/headless compositor command.
-
-    Prefers ``kwin_wayland`` first when available because it supports isolated
-    direct EIS input injection and D-Bus window geometry inside private
-    sandboxes without host portal dialogs, falling back to ``sway`` / ``weston``.
-    """
-    if explicit_cmd and explicit_cmd != DEFAULT_VIRTUAL_CMD:
-        return explicit_cmd
-
-    wayland_flag = f"--wayland-display {host_wayland_display} " if host_wayland_display else ""
-
-    if headed:
-        if shutil.which("kwin_wayland"):
-            return (
-                f"kwin_wayland {wayland_flag}--xwayland --no-lockscreen --no-global-shortcuts "
-                f"--width {width} --height {height} --socket {socket_name}"
-            )
-        if shutil.which("sway"):
-            return "sway"
-        if shutil.which("weston"):
-            return f"weston --socket={socket_name} --width={width} --height={height}"
-        return f"weston --socket={socket_name} --width={width} --height={height}"
-
-    if shutil.which("kwin_wayland"):
-        return (
-            f"kwin_wayland --virtual --socket {socket_name} "
-            f"--no-lockscreen --no-global-shortcuts --width {width} --height {height}"
-        )
-    if shutil.which("weston"):
-        return (
-            f"weston --backend=headless-backend.so --socket={socket_name} "
-            f"--width={width} --height={height}"
-        )
-    return explicit_cmd
 
 
 _active_config: Config | None = None

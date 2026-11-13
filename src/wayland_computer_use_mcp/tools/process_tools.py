@@ -8,10 +8,8 @@ from typing import Any
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from wayland_computer_use_mcp.compositors import (
-    ensure_portal_dialogs_above,
-    minimize_window,
-)
+from wayland_computer_use_mcp.compositors import minimize_window
+from wayland_computer_use_mcp.config import get_config
 from wayland_computer_use_mcp.portal import global_portal_session
 from wayland_computer_use_mcp.process import (
     get_logs,
@@ -25,6 +23,11 @@ from wayland_computer_use_mcp.process import (
 )
 
 logger = logging.getLogger("wayland_computer_use_mcp.tools.process")
+
+
+def ensure_portal_dialogs_above() -> bool:
+    """Delegates portal dialog foregrounding through the active session driver."""
+    return global_portal_session.active_driver().ensure_dialogs_above()
 
 
 def _ensure_session_initialized() -> None:
@@ -62,10 +65,8 @@ def launch_app(
     If restart=True or if the app is already running, gracefully terminates the old process
     and launches a fresh instance.
     """
-    from wayland_computer_use_mcp.config import get_config
-
     cfg = get_config()
-    if cfg.display_mode != "virtual" and not cfg.mock_mode:
+    if not cfg.mock_mode and not cfg.lazy_portal:
         ensure_portal_dialogs_above()
 
     current_pid = global_portal_session.target_pid
@@ -75,14 +76,15 @@ def launch_app(
             minimize_window(current_pid)
             new_pid = restart_process(current_pid)
             initial_elements = _bind_focus_and_collect_elements(new_pid)
+            meta = global_portal_session.metadata()
             return {
                 "status": "restarted",
                 "old_pid": current_pid,
                 "pid": new_pid,
                 "target": target,
-                "session_handle": global_portal_session.session_handle,
-                "restore_token": global_portal_session.restore_token,
-                "eis_connected": global_portal_session.eis_fd is not None,
+                "session_handle": meta.get("session_handle"),
+                "restore_token": meta.get("restore_token"),
+                "eis_connected": bool(meta.get("eis_connected", False)),
                 "interactive_elements": initial_elements,
             }
         except Exception as exc:
@@ -115,15 +117,16 @@ def launch_app(
 
     initial_elements = _bind_focus_and_collect_elements(pid)
 
+    meta = global_portal_session.metadata()
     return {
         "status": "launched",
         "pid": pid,
         "target": target,
         "args": args or [],
         "cwd": cwd,
-        "session_handle": global_portal_session.session_handle,
-        "restore_token": global_portal_session.restore_token,
-        "eis_connected": global_portal_session.eis_fd is not None,
+        "session_handle": meta.get("session_handle"),
+        "restore_token": meta.get("restore_token"),
+        "eis_connected": bool(meta.get("eis_connected", False)),
         "interactive_elements": initial_elements,
     }
 
@@ -152,19 +155,22 @@ def restart_app(pid: int | None = None) -> dict[str, Any]:
         )
 
     minimize_window(effective_pid)
-    ensure_portal_dialogs_above()
+    cfg = get_config()
+    if not cfg.mock_mode and not cfg.lazy_portal:
+        ensure_portal_dialogs_above()
     _ensure_session_initialized()
 
     new_pid = restart_process(effective_pid)
     initial_elements = _bind_focus_and_collect_elements(new_pid)
 
+    meta = global_portal_session.metadata()
     return {
         "status": "restarted",
         "old_pid": effective_pid,
         "new_pid": new_pid,
-        "session_handle": global_portal_session.session_handle,
-        "restore_token": global_portal_session.restore_token,
-        "eis_connected": global_portal_session.eis_fd is not None,
+        "session_handle": meta.get("session_handle"),
+        "restore_token": meta.get("restore_token"),
+        "eis_connected": bool(meta.get("eis_connected", False)),
         "interactive_elements": initial_elements,
     }
 

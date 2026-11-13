@@ -3,6 +3,7 @@
 import pytest
 
 from wayland_computer_use_mcp.a11y import clear_node_cache
+from wayland_computer_use_mcp.core.context import set_active_context
 from wayland_computer_use_mcp.portal import global_portal_session
 from wayland_computer_use_mcp.process import is_responsive, terminate
 
@@ -15,11 +16,10 @@ def isolate_session_state(request):
     is_live = request.node.get_closest_marker("live") is not None
     if not is_live:
         prev_mock_cfg = get_config().mock_mode
-        prev_mock_session = global_portal_session._is_mock
         clear_node_cache()
+        set_active_context(None)
         global_portal_session.target_pid = None
         get_config().mock_mode = True
-        global_portal_session._is_mock = True
 
         yield
 
@@ -32,10 +32,9 @@ def isolate_session_state(request):
                 pass
         global_portal_session.target_pid = None
         get_config().mock_mode = prev_mock_cfg
-        global_portal_session._is_mock = prev_mock_session
+        set_active_context(None)
         clear_node_cache()
     else:
         # For live desktop tests, ensure mock_mode is disabled
         get_config().mock_mode = False
-        global_portal_session._is_mock = False
         yield

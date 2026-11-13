@@ -28,7 +28,6 @@ from wayland_computer_use_mcp.server import (
 @pytest.fixture(autouse=True)
 def setup_mock(monkeypatch):
     monkeypatch.setattr(get_config(), "mock_mode", True)
-    monkeypatch.setattr(global_portal_session, "_is_mock", True)
     clear_node_cache()
 
 

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 from PIL import Image
 
+from wayland_computer_use_mcp.compat.host_driver import HostInputSink
 from wayland_computer_use_mcp.portal.input import InputDispatcher
 from wayland_computer_use_mcp.portal.remotedesktop import (
     AsyncLoopThread,
@@ -56,13 +57,13 @@ def test_input_dispatcher_mock_actions():
     """
     mock_rd = MagicMock(spec=RemoteDesktopClient)
     mock_ei = MagicMock()
+    mock_rd.ei_client = mock_ei
+    sink = HostInputSink(mock_rd)
 
     dispatcher = InputDispatcher(
-        rd_client=mock_rd,
+        get_sink_fn=lambda: sink,
         verify_preconditions_fn=lambda: None,
         get_offsets_fn=lambda: (0, 0),
-        is_mock_fn=lambda: False,
-        get_ei_client_fn=lambda: mock_ei,
     )
 
     # Click - single source routes to EI, not RemoteDesktop
@@ -116,13 +117,13 @@ def test_input_dispatcher_fallback_rd_client():
     mock_ei.button_device = None
     mock_ei.scroll_device = None
     mock_ei.keyboard_device = None
+    mock_rd.ei_client = mock_ei
+    sink = HostInputSink(mock_rd)
 
     dispatcher = InputDispatcher(
-        rd_client=mock_rd,
+        get_sink_fn=lambda: sink,
         verify_preconditions_fn=lambda: None,
         get_offsets_fn=lambda: (0, 0),
-        is_mock_fn=lambda: False,
-        get_ei_client_fn=lambda: mock_ei,
     )
 
     # Click fallback
@@ -146,6 +147,8 @@ def test_input_dispatcher_long_text_clipboard_paste(monkeypatch):
     """Verifies strings > 30 characters trigger automatic clipboard paste fallback."""
     mock_rd = MagicMock(spec=RemoteDesktopClient)
     mock_ei = MagicMock()
+    mock_rd.ei_client = mock_ei
+    sink = HostInputSink(mock_rd)
     pasted_clipboard = []
 
     monkeypatch.setattr(
@@ -154,11 +157,9 @@ def test_input_dispatcher_long_text_clipboard_paste(monkeypatch):
     )
 
     dispatcher = InputDispatcher(
-        rd_client=mock_rd,
+        get_sink_fn=lambda: sink,
         verify_preconditions_fn=lambda: None,
         get_offsets_fn=lambda: (0, 0),
-        is_mock_fn=lambda: False,
-        get_ei_client_fn=lambda: mock_ei,
     )
 
     long_str = "This is a very long string that should be pasted directly via clipboard."
@@ -351,9 +352,9 @@ def test_verify_preconditions_resolves_frame_child_bounds_fallback(monkeypatch):
 
     session = PortalSession()
     session._initialized = True
-    session._is_mock = False
     session.target_pid = 4321
     session.target_title = "Wayland MCP Test Rig"
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
 
     cfg = get_config()
     prev_mock_cfg = cfg.mock_mode
@@ -408,13 +409,13 @@ def test_input_dispatcher_blocks_relative_only_eis_without_screencast(monkeypatc
     ei.pointer_device = 0x5678
     ei.button_device = 0x5678
     ei.button_click = MagicMock()
+    mock_rd.ei_client = ei
+    sink = HostInputSink(mock_rd)
 
     dispatcher = InputDispatcher(
-        rd_client=mock_rd,
+        get_sink_fn=lambda: sink,
         verify_preconditions_fn=lambda: None,
         get_offsets_fn=lambda: (0, 0),
-        is_mock_fn=lambda: False,
-        get_ei_client_fn=lambda: ei,
     )
 
     with pytest.raises(RuntimeError, match="relative pointer without a ScreenCast stream"):

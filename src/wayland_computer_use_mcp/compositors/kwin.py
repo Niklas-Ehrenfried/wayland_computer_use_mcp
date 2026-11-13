@@ -26,25 +26,44 @@ from wayland_computer_use_mcp.compositors.base import (
 logger = logging.getLogger(__name__)
 
 
+def _has_wayland_display() -> bool:
+    from wayland_computer_use_mcp.core.context import get_active_context
+
+    ctx = get_active_context()
+    return bool((ctx and ctx.wayland_display) or os.environ.get("WAYLAND_DISPLAY"))
+
+
+async def _connect_session_bus() -> MessageBus:
+    from wayland_computer_use_mcp.core.context import get_active_context
+
+    ctx = get_active_context()
+    if ctx and ctx.dbus_address:
+        return await MessageBus(bus_address=ctx.dbus_address).connect()
+    return await MessageBus(bus_type=BusType.SESSION).connect()
+
+
 class KWinBackend(CompositorBackend):
     """Compositor backend implementation for KDE Plasma 6 / KWin Wayland."""
 
     name: str = "kwin"
 
     async def is_available(self) -> bool:
-        if not os.environ.get("WAYLAND_DISPLAY"):
+        if not _has_wayland_display():
             return False
         from wayland_computer_use_mcp.config import get_config
+        from wayland_computer_use_mcp.core.context import get_active_context
 
+        ctx = get_active_context()
         desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
         if (
             "kde" not in desktop
             and "plasma" not in desktop
             and get_config().display_mode != "virtual"
+            and not (ctx and ctx.is_isolated)
         ):
             return False
         try:
-            bus = await MessageBus(bus_type=BusType.SESSION).connect()
+            bus = await _connect_session_bus()
             reply = await bus.call(
                 Message(
                     destination="org.freedesktop.DBus",
@@ -64,11 +83,11 @@ class KWinBackend(CompositorBackend):
     async def get_window_geometry(
         self, pid: int | None = None, title: str | None = None
     ) -> WindowGeometry | None:
-        if not os.environ.get("WAYLAND_DISPLAY"):
+        if not _has_wayland_display():
             return None
 
         try:
-            bus = await MessageBus(bus_type=BusType.SESSION).connect()
+            bus = await _connect_session_bus()
         except Exception as exc:
             logger.debug("Could not connect to session bus for KWin scripting: %s", exc)
             return None
@@ -201,11 +220,11 @@ class KWinBackend(CompositorBackend):
         return [DisplayInfo(name="Primary", x=0, y=0, width=1920, height=1080, scale=1.0)]
 
     async def set_window_state(self, pid: int, state: WindowState) -> bool:
-        if not os.environ.get("WAYLAND_DISPLAY") or pid <= 0:
+        if not _has_wayland_display() or pid <= 0:
             return False
 
         try:
-            bus = await MessageBus(bus_type=BusType.SESSION).connect()
+            bus = await _connect_session_bus()
         except Exception:
             return False
 
@@ -271,11 +290,11 @@ class KWinBackend(CompositorBackend):
             bus.disconnect()
 
     async def ensure_dialogs_above(self) -> bool:
-        if not os.environ.get("WAYLAND_DISPLAY"):
+        if not _has_wayland_display():
             return False
 
         try:
-            bus = await MessageBus(bus_type=BusType.SESSION).connect()
+            bus = await _connect_session_bus()
         except Exception:
             return False
 

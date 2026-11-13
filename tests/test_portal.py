@@ -9,7 +9,7 @@ from wayland_computer_use_mcp.security import global_clamper, global_geometry_de
 
 def test_portal_mock_capture_and_cropping():
     session = PortalSession()
-    session._init_mock_session()
+    session.ensure_initialized()
 
     # Capture full frame
     frame = session.capture_frame()
@@ -36,7 +36,7 @@ def test_crop_element_boundary_clamping():
 
 def test_dispatch_click_clamping():
     session = PortalSession()
-    session._init_mock_session()
+    session.ensure_initialized()
     global_clamper.set_bounds(800, 600)
     global_geometry_detector.record_capture(800, 600)
 
@@ -51,7 +51,7 @@ def test_dispatch_click_clamping():
 
 def test_dispatch_drag_clamping():
     session = PortalSession()
-    session._init_mock_session()
+    session.ensure_initialized()
     global_clamper.set_bounds(800, 600)
     global_geometry_detector.record_capture(800, 600)
 
@@ -64,7 +64,7 @@ def test_dispatch_drag_clamping():
 
 def test_dispatch_scroll_and_type():
     session = PortalSession()
-    session._init_mock_session()
+    session.ensure_initialized()
 
     scroll_msg = session.dispatch_scroll(0, -100)
     assert "Scrolled dx=0, dy=-100" in scroll_msg

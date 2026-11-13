@@ -13,6 +13,16 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from wayland_computer_use_mcp.core.wayland_wire import (
+    build_msg as _build_msg,
+)
+from wayland_computer_use_mcp.core.wayland_wire import (
+    pack_string as _pack_string,
+)
+from wayland_computer_use_mcp.core.wayland_wire import (
+    unpack_string as _unpack_string,
+)
+
 logger = logging.getLogger(__name__)
 
 _TEXT_MIMES = (
@@ -24,25 +34,14 @@ _TEXT_MIMES = (
 )
 
 
-def _pack_string(value: str) -> bytes:
-    encoded = value.encode("utf-8") + b"\x00"
-    pad = (4 - (len(encoded) % 4)) % 4
-    return struct.pack("<I", len(encoded)) + encoded + (b"\x00" * pad)
-
-
-def _unpack_string(body: bytes, offset: int = 0) -> tuple[str, int]:
-    (slen,) = struct.unpack_from("<I", body, offset)
-    raw = body[offset + 4 : offset + 4 + max(0, slen - 1)]
-    pad = (4 - (slen % 4)) % 4
-    return raw.decode("utf-8", errors="replace"), offset + 4 + slen + pad
-
-
-def _build_msg(obj_id: int, opcode: int, payload: bytes = b"") -> bytes:
-    size = 8 + len(payload)
-    return struct.pack("<II", obj_id, (size << 16) | opcode) + payload
-
-
 def _resolve_wayland_socket_path() -> str | None:
+    from wayland_computer_use_mcp.core.context import get_active_context
+
+    ctx = get_active_context()
+    if ctx is not None:
+        ctx_sock = ctx.wayland_socket_path()
+        if ctx_sock and os.path.exists(ctx_sock):
+            return ctx_sock
     wl_display = os.environ.get("WAYLAND_DISPLAY")
     if not wl_display:
         return None

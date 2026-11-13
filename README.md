@@ -40,16 +40,15 @@ Traditional screenshot-driven computer use models stream full monitor or window 
 
 The server operates in two distinct display modes and supports fine-grained access scopes:
 
-### 1. Display Modes
-- **Live Mode (`--live` or `WAYLAND_MCP_DISPLAY_MODE="live"`)** *(Default)*:
-  - Connects to the user's active desktop session via `$WAYLAND_DISPLAY`.
-  - Interfaces with the active session D-Bus and AT-SPI2 bus.
-  - Caches and reuses XDG Desktop Portal `restore_token` credentials to prevent repeated permission prompts.
-  - Executes Level 1 AT-SPI actions without moving the host cursor; physical pointer motion only triggers on explicit pointer tools or Level 2 fallback.
-- **Virtual / Isolated Mode (`--virtual`, `--virtual-window`, `WAYLAND_MCP_DISPLAY_MODE="virtual"`, or `WAYLAND_MCP_DISPLAY_MODE="virtual-window"`)**:
-  - Starts a private `XDG_RUNTIME_DIR`, isolated `dbus-daemon`, isolated AT-SPI2 bus, and a dedicated nested/headless compositor (`kwin_wayland`, `sway`, or `weston`), keeping your host pointer, focus, and clipboard untouched without triggering host portal prompts.
+### 1. Display Modes & Blackbox Architecture
+- **Virtual / Blackbox Mode (`--virtual`, `--virtual-window`, `WAYLAND_MCP_DISPLAY_MODE="virtual"`, or `WAYLAND_MCP_DISPLAY_MODE="virtual-window"`)**:
+  - Starts a private `XDG_RUNTIME_DIR`, isolated `dbus-daemon`, isolated AT-SPI2 bus, and a dedicated nested/headless compositor (`kwin_wayland` via direct EIS, `labwc`/`sway` via pure-Python `zwlr_screencopy_manager_v1` + virtual pointer/keyboard protocols, or `weston`), keeping your host pointer, focus, and clipboard untouched without triggering host portal prompts.
   - `--virtual`: Headless virtual Wayland compositor for unattended/CI runs.
   - `--virtual-window` / `WAYLAND_MCP_DISPLAY_MODE="virtual-window"` / `WAYLAND_MCP_VIRTUAL_HEADED=1`: Opens a **Playwright-style visible nested compositor window** so you can watch the agent drive an app in its own isolated window.
+- **Live Host-Passthrough Mode (`--live` or `WAYLAND_MCP_DISPLAY_MODE="live"`)** *(Default)*:
+  - Connects to the user's active desktop session via `$WAYLAND_DISPLAY`, session D-Bus, and AT-SPI2 bus.
+  - Caches and reuses XDG Desktop Portal `restore_token` credentials to prevent repeated permission prompts.
+  - Optional `--lazy-portal` / `WAYLAND_MCP_LAZY_PORTAL=1`: Defers XDG RemoteDesktop/ScreenCast prompts until a screenshot (`capture_window_frame`) or physical pointer/keyboard fallback is requested, keeping pure AT-SPI interaction prompt-free.
 
 ### 2. Access Scopes
 - **Window Isolation (`--window-only` or `WAYLAND_MCP_ACCESS_MODE="window"`)** *(Default)*:
@@ -99,10 +98,10 @@ The core package requires only pure/wheel dependencies (`fastmcp`, `dbus-fast`, 
   uv pip install "wayland-computer-use-mcp[gstreamer]"
   ```
 - **Visible isolated Playwright-style window**:
-  Uses `kwin_wayland` (built into KDE Plasma), `sway`, or `weston`:
+  Uses `kwin_wayland` (built into KDE Plasma), `labwc`/`sway`, or `weston`:
   ```bash
-  # No extra compositor install needed on KDE Plasma (`kwin_wayland`); on GNOME/other desktops install weston or sway:
-  sudo apt install -y weston    # or Fedora: sudo dnf install weston / Arch: pacman -S weston
+  # No extra compositor install needed on KDE Plasma (`kwin_wayland`); on GNOME/other desktops install labwc (recommended) or sway:
+  sudo apt install -y labwc     # Fedora: sudo dnf install labwc / Arch: pacman -S labwc
   uvx wayland-computer-use-mcp --virtual-window
   ```
 - **Target app development libraries** (only if building/running the GTK4 example rig):
