@@ -189,11 +189,16 @@ class AtspiEventListener:
             }
 
         start_snapshot_time = time.time()
+        min_wait_deadline = min(deadline, start_snapshot_time + max(0.05, quiet_sec))
         while time.time() < deadline:
             time.sleep(0.02)
+            now = time.time()
             with self._lock:
-                idle = (time.time() - self._last_event_time) >= quiet_sec
-            if idle:
+                saw_new_event = self._last_event_time >= start_snapshot_time
+                idle_since_last = (now - self._last_event_time) >= quiet_sec
+            if saw_new_event and idle_since_last:
+                break
+            if not saw_new_event and now >= min_wait_deadline:
                 break
 
         elapsed = int((time.time() - start_time) * 1000)

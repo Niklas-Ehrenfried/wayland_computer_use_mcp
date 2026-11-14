@@ -240,6 +240,7 @@ def wrap_with_delta(
         )
 
     before = snapshot_interactive_state(pid)
+    action_start = time.time()
     raw = action_fn()
     if settle_ms > 0:
         try:
@@ -258,6 +259,15 @@ def wrap_with_delta(
     after = snapshot_interactive_state(pid)
 
     delta = compute_ui_delta(before, after)
+    # Retry once within remaining settle budget if toolkit flushed AT-SPI updates late
+    if settle_ms >= 80 and not delta["modified"] and not delta["appeared"] and not delta["hidden"]:
+        elapsed_ms = (time.time() - action_start) * 1000.0
+        remaining_ms = settle_ms - elapsed_ms
+        if remaining_ms > 15:
+            time.sleep(min(remaining_ms, 60.0) / 1000.0)
+            after = snapshot_interactive_state(pid)
+            delta = compute_ui_delta(before, after)
+
     raw_str = raw if isinstance(raw, str) else raw.get("result", str(raw))
 
     return InteractionResult(

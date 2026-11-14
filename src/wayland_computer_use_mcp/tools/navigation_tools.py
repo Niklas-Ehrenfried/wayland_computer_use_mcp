@@ -11,6 +11,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from wayland_computer_use_mcp.a11y import (
+    build_compact_hierarchy,
     get_application_tree,
     get_cached_node,
     global_event_listener,
@@ -82,10 +83,23 @@ def _resolve_target_node_id(pid: int, target: str, role: str | None = None) -> s
     return _match_element(elements, target_lower, role_lower)
 
 
-def inspect_ui_tree(pid: int | None = None, max_depth: int = 24) -> dict[str, Any]:
-    """Inspects semantic accessibility tree and returns compact 1D interactive elements.
+def inspect_ui_tree(
+    pid: int | None = None,
+    max_depth: int = 24,
+    include_raw_tree: Annotated[
+        bool,
+        Field(
+            description=(
+                "Include the unpruned raw AT-SPI node tree (D-Bus paths, layout wrappers). "
+                "Defaults to False for a compact functional hierarchy and interactive elements."
+            )
+        ),
+    ] = False,
+) -> dict[str, Any]:
+    """Inspects semantic accessibility tree and returns functional hierarchy + 1D interactive nodes.
 
-    Includes window geometry, widget states, and automatically embeds process health.
+    Includes compact functional component hierarchy, actionable elements, screen bounds, and
+    process health by default. Set include_raw_tree=True only when debugging raw AT-SPI nodes.
     """
     effective_pid = pid or global_portal_session.target_pid
     if not effective_pid:
@@ -97,9 +111,29 @@ def inspect_ui_tree(pid: int | None = None, max_depth: int = 24) -> dict[str, An
     global_portal_session.target_pid = effective_pid
 
     tree = get_application_tree(effective_pid, max_depth=max_depth)
-    tree["pid"] = effective_pid
-    tree["responsive"] = is_responsive(effective_pid)
-    return tree
+    responsive = is_responsive(effective_pid)
+    hierarchy = tree.get("hierarchy") or build_compact_hierarchy(tree)
+
+    if include_raw_tree:
+        tree["pid"] = effective_pid
+        tree["responsive"] = responsive
+        tree["hierarchy"] = hierarchy
+        return tree
+
+    payload: dict[str, Any] = {
+        "pid": effective_pid,
+        "name": tree.get("name", ""),
+        "role": tree.get("role", "application"),
+        "responsive": responsive,
+    }
+    if "screen_bounds" in tree:
+        payload["screen_bounds"] = tree["screen_bounds"]
+    bounds = tree.get("bounds")
+    if isinstance(bounds, list) and len(bounds) == 4 and bounds[2] > 0 and bounds[3] > 0:
+        payload["bounds"] = bounds
+    payload["hierarchy"] = hierarchy
+    payload["interactive_elements"] = tree.get("interactive_elements", [])
+    return payload
 
 
 def interact_with_node(
@@ -176,7 +210,7 @@ def interact_with_node(
 
     target_ident = resolved_node_id or resolved_target
     is_live = effective_pid > 0 and not global_portal_session.is_mock
-    settle_ms = settle_timeout_ms if settle_timeout_ms > 0 else (25 if is_live else 0)
+    settle_ms = settle_timeout_ms if settle_timeout_ms > 0 else (60 if is_live else 0)
     raw_res = wrap_with_delta(
         effective_pid if not global_portal_session.is_mock else 0,
         _execute,
@@ -210,12 +244,15 @@ def batch_actions(
     global_portal_session.target_pid = effective_pid
 
     executed_results: list[str] = []
+    step_records: list[dict[str, Any]] = []
     total_steps = len(actions)
+    is_live = effective_pid > 0 and not global_portal_session.is_mock
+    batch_before = snapshot_interactive_state(effective_pid) if is_live else {}
 
     for idx, step in enumerate(actions, start=1):
         action_type = step.get("action", "").lower()
         before = None
-        if effective_pid > 0 and not global_portal_session.is_mock and action_type != "wait":
+        if is_live and action_type != "wait":
             before = snapshot_interactive_state(effective_pid)
 
         try:
@@ -297,14 +334,30 @@ def batch_actions(
             else:
                 raise ValueError(f"Unknown action type '{action_type}' at step {idx}")
 
+            step_delta: dict[str, list[dict[str, Any]]] = {
+                "modified": [],
+                "appeared": [],
+                "hidden": [],
+            }
             if before is not None:
-                time.sleep(0.02)
+                time.sleep(0.05)
                 after = snapshot_interactive_state(effective_pid)
-                delta = compute_ui_delta(before, after)
-                step_res += format_delta_markdown(delta)
+                step_delta = compute_ui_delta(before, after)
 
             enriched = check_process_health_and_enrich(effective_pid, step_res)
-            executed_results.append(f"Step {idx}: {enriched}")
+            has_delta = bool(
+                step_delta["modified"] or step_delta["appeared"] or step_delta["hidden"]
+            )
+            step_summary = enriched + (format_delta_markdown(step_delta) if has_delta else "")
+            executed_results.append(f"Step {idx}: {step_summary}")
+            step_records.append(
+                {
+                    "step": idx,
+                    "action": action_type,
+                    "result": enriched,
+                    "ui_changes": step_delta,
+                }
+            )
 
         except Exception as exc:
             failure_info: dict[str, Any] = {
@@ -313,6 +366,7 @@ def batch_actions(
                 "total_steps": total_steps,
                 "error": str(exc),
                 "executed_steps": executed_results,
+                "steps": step_records,
             }
             if not global_portal_session.is_mock and global_portal_session.is_active():
                 try:
@@ -327,11 +381,18 @@ def batch_actions(
                     pass
             return failure_info
 
+    net_delta = (
+        compute_ui_delta(batch_before, snapshot_interactive_state(effective_pid))
+        if is_live and batch_before
+        else {"modified": [], "appeared": [], "hidden": []}
+    )
     return {
         "status": "success",
         "executed_steps_count": len(executed_results),
         "total_steps": total_steps,
         "results": executed_results,
+        "steps": step_records,
+        "ui_changes": net_delta,
     }
 
 

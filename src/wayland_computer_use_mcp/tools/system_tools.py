@@ -19,12 +19,12 @@ logger = logging.getLogger("wayland_computer_use_mcp.tools.system")
 
 
 def clipboard_read() -> str:
-    """Reads current text contents from the Wayland clipboard via wl-paste."""
+    """Reads current text contents from the Wayland clipboard."""
     return global_portal_session.dispatch_clipboard_read()
 
 
 def clipboard_write(text: str) -> str:
-    """Writes text into the Wayland clipboard via wl-copy."""
+    """Writes text into the Wayland clipboard."""
     return global_portal_session.dispatch_clipboard_write(text)
 
 

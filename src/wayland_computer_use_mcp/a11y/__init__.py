@@ -33,6 +33,7 @@ from wayland_computer_use_mcp.a11y.events import (
 from wayland_computer_use_mcp.a11y.synthetic import build_synthetic_tree
 from wayland_computer_use_mcp.a11y.tree import (
     _node_cache,
+    build_compact_hierarchy,
     clear_node_cache,
     flatten_tree,
     get_application_tree,
@@ -47,6 +48,7 @@ __all__ = [
     "ROLE_PREFIX_MAP",
     "AtspiInspector",
     "_node_cache",
+    "build_compact_hierarchy",
     "build_synthetic_tree",
     "clear_node_cache",
     "close_atspi_pool",

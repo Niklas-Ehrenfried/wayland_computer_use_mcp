@@ -649,3 +649,120 @@ def test_smart_typing_thresholds():
         "This is an intentionally very long text string that exceeds 30 characters"
     )
     assert "Pasted" in res_long or "Typed" in res_long
+
+
+def test_gtk4_sensitive_state_and_compact_hierarchy(monkeypatch):
+    """GTK4 'sensitive' maps to enabled=True, inner labels drop, and raw tree is optional."""
+    from wayland_computer_use_mcp.config import get_config
+
+    monkeypatch.setattr(get_config(), "mock_mode", True)
+
+    sample_raw_tree = {
+        "role": "application",
+        "name": "Gtk4App",
+        "bus_name": ":1.42",
+        "path": "/org/a11y/atspi/accessible/root",
+        "states": [],
+        "bounds": [0, 0, 0, 0],
+        "children": [
+            {
+                "role": "frame",
+                "name": "Main Window",
+                "bus_name": ":1.42",
+                "path": "/org/a11y/atspi/accessible/1",
+                "states": ["visible", "showing", "active"],
+                "bounds": [0, 0, 720, 640],
+                "children": [
+                    {
+                        "role": "generic",
+                        "name": "",
+                        "bus_name": ":1.42",
+                        "path": "/org/a11y/atspi/accessible/2",
+                        "states": ["visible", "showing"],
+                        "bounds": [0, 0, 720, 640],
+                        "children": [
+                            {
+                                "role": "push button",
+                                "name": "Submit",
+                                "bus_name": ":1.42",
+                                "path": "/org/a11y/atspi/accessible/3",
+                                "states": ["visible", "showing", "sensitive"],
+                                "bounds": [20, 20, 100, 36],
+                                "children": [
+                                    {
+                                        "role": "label",
+                                        "name": "Submit",
+                                        "states": ["visible", "showing"],
+                                        "bounds": [25, 25, 90, 20],
+                                        "children": [],
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tab panel",
+                        "name": "",
+                        "states": [],
+                        "bounds": [0, 0, -394143696, 32698],
+                        "children": [],
+                    },
+                ],
+            }
+        ],
+    }
+
+    monkeypatch.setattr(
+        "wayland_computer_use_mcp.tools.navigation_tools.get_application_tree",
+        lambda pid, max_depth=24: {
+            **sample_raw_tree,
+            "interactive_elements": flatten_tree(sample_raw_tree, pid=pid),
+        },
+    )
+
+    compact_res = inspect_ui_tree(pid=4321)
+    assert "children" not in compact_res
+    assert "bus_name" not in compact_res
+    assert len(compact_res["interactive_elements"]) == 1
+    btn = compact_res["interactive_elements"][0]
+    assert btn["id"] == "b1"
+    assert btn["enabled"] is True
+    assert "enabled" in btn["states"]
+
+    hierarchy_str = str(compact_res["hierarchy"])
+    assert "bus_name" not in hierarchy_str
+    assert "-394143696" not in hierarchy_str
+    frame_node = compact_res["hierarchy"]["children"][0]
+    assert frame_node["role"] == "frame"
+    # Anonymous 'generic' wrapper should be unwrapped straight to the button
+    assert frame_node["children"] == [{"id": "b1", "role": "push button", "name": "Submit"}]
+
+    raw_res = inspect_ui_tree(pid=4321, include_raw_tree=True)
+    assert "children" in raw_res
+    assert raw_res["bus_name"] == ":1.42"
+    assert "hierarchy" in raw_res
+
+
+def test_lifecycle_metadata_omits_none_and_batch_steps_uniform(monkeypatch):
+    """Blackbox metadata omits None handles; batch_actions returns uniform steps & ui_changes."""
+    from wayland_computer_use_mcp.config import get_config
+    from wayland_computer_use_mcp.tools.process_tools import _lifecycle_metadata
+
+    monkeypatch.setattr(
+        global_portal_session,
+        "metadata",
+        lambda: {"session_handle": None, "restore_token": None, "eis_connected": True},
+    )
+    meta = _lifecycle_metadata([])
+    assert "session_handle" not in meta
+    assert "restore_token" not in meta
+    assert meta["eis_connected"] is True
+
+    monkeypatch.setattr(get_config(), "mock_mode", True)
+    res = batch_actions([{"action": "wait", "ms": 5}], pid=12345)
+    assert res["status"] == "success"
+    assert res["steps"][0]["step"] == 1
+    assert res["steps"][0]["action"] == "wait"
+    assert res["steps"][0]["ui_changes"] == {"modified": [], "appeared": [], "hidden": []}
+    assert "UI Changes: None" not in res["results"][0]
+    assert res["ui_changes"] == {"modified": [], "appeared": [], "hidden": []}

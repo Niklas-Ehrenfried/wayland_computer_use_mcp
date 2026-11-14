@@ -37,12 +37,12 @@ def preset_workflow(
     - 'delete': Deletes a preset artifact.
 
     Step schema matches batch_actions:
-    - {"action": "interact", "node_id": "b1"}
-    - {"action": "type", "node_id": "e1", "text": "value"}
+    - {"action": "interact", "target": "b1"}
+    - {"action": "type", "target": "e1", "text": "value"}
     - {"action": "click", "x": 100, "y": 200, "button": "left"}
     - {"action": "key", "keys": ["ctrl", "a"]}
     - {"action": "scroll", "dx": 0, "dy": 5}
-    - {"action": "hover", "node_id": "b1"}
+    - {"action": "hover", "target": "b1"}
     - {"action": "wait", "ms": 50}
     """
     act = action.strip().lower()

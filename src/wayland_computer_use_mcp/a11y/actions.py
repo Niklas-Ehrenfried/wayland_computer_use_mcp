@@ -307,7 +307,18 @@ def _prepare_pointer_target(pid: int, target_x: int, target_y: int) -> tuple[int
         try:
             from wayland_computer_use_mcp.tools.visual_tools import focus_window
 
+            prev_offsets = (
+                global_portal_session.window_offset_x,
+                global_portal_session.window_offset_y,
+            )
             focus_window(pid)
+            new_offsets = (
+                global_portal_session.window_offset_x,
+                global_portal_session.window_offset_y,
+            )
+            # Allow compositor surface activation/placement to settle before clicking
+            if new_offsets != prev_offsets or new_offsets != (0, 0):
+                time.sleep(0.05)
         except Exception:
             pass
 

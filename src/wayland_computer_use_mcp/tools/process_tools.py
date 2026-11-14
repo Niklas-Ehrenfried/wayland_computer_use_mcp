@@ -31,12 +31,15 @@ def ensure_portal_dialogs_above() -> bool:
 
 def _lifecycle_metadata(elements: list[dict[str, Any]]) -> dict[str, Any]:
     meta = global_portal_session.metadata()
-    return {
-        "session_handle": meta.get("session_handle"),
-        "restore_token": meta.get("restore_token"),
+    payload: dict[str, Any] = {
         "eis_connected": bool(meta.get("eis_connected", False)),
         "interactive_elements": elements,
     }
+    if meta.get("session_handle") is not None:
+        payload["session_handle"] = meta.get("session_handle")
+    if meta.get("restore_token") is not None:
+        payload["restore_token"] = meta.get("restore_token")
+    return payload
 
 
 def _bind_focus_and_collect_elements(pid: int) -> list[dict[str, Any]]:
@@ -161,6 +164,7 @@ def restart_app(pid: int | None = None) -> dict[str, Any]:
 
     return {
         "status": "restarted",
+        "pid": new_pid,
         "old_pid": effective_pid,
         "new_pid": new_pid,
         **_lifecycle_metadata(initial_elements),
