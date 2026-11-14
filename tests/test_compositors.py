@@ -19,10 +19,8 @@ from wayland_computer_use_mcp.compositors import (
     WlrootsBackend,
     activate_and_raise_window,
     get_compositor_backend,
-    minimize_window,
     query_window_geometry,
     reset_compositor_backend,
-    restore_window,
     set_window_state,
 )
 
@@ -270,8 +268,8 @@ def test_sync_wrappers():
     ):
         assert query_window_geometry(123) == (10, 20, 300, 400)
         assert activate_and_raise_window(123) is True
-        assert minimize_window(123) is True
-        assert restore_window(123) is True
+        assert set_window_state(123, "minimize") is True
+        assert set_window_state(123, "restore") is True
         assert set_window_state(123, "maximize") is True
 
 

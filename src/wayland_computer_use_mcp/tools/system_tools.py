@@ -78,11 +78,6 @@ def window_control(action: str, pid: int | None = None) -> dict[str, Any]:
     if not effective_pid:
         raise RuntimeError("No active application PID provided or currently managed.")
 
-    from wayland_computer_use_mcp.compositors import (
-        activate_and_raise_window,
-        set_window_state,
-    )
-
     norm_action = action.strip().lower()
     valid_actions = {"minimize", "maximize", "restore", "focus", "close"}
     if norm_action not in valid_actions:
@@ -90,10 +85,11 @@ def window_control(action: str, pid: int | None = None) -> dict[str, Any]:
             f"Invalid window action '{action}'. Must be one of: {', '.join(sorted(valid_actions))}."
         )
 
+    driver = global_portal_session.active_driver()
     if norm_action == "focus":
-        success = activate_and_raise_window(pid=effective_pid)
+        success = driver.activate_window(pid=effective_pid)
     else:
-        success = set_window_state(effective_pid, norm_action)  # type: ignore
+        success = driver.set_window_state(effective_pid, norm_action)
 
     return {
         "action": norm_action,

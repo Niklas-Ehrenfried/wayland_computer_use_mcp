@@ -6,7 +6,7 @@ from typing import Any
 
 from PIL import Image, ImageDraw
 
-from wayland_computer_use_mcp.core.context import InputCapabilities, InputSink, SessionContext
+from wayland_computer_use_mcp.core.context import InputSink, SessionContext
 
 
 class MockInputSink:
@@ -102,14 +102,6 @@ class MockSessionDriver:
 
     def get_input_sink(self) -> InputSink:
         return self._sink
-
-    def input_capabilities(self) -> InputCapabilities:
-        return InputCapabilities(
-            has_absolute_pointer=True,
-            has_relative_pointer=False,
-            has_keyboard=True,
-            is_isolated=True,
-        )
 
     def capture_output_frame(self) -> Image.Image | None:
         if self._frame is None:

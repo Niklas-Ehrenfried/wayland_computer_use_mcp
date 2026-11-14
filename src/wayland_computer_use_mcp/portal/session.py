@@ -102,7 +102,7 @@ class PortalSession:
     def ensure_initialized(self, app_id: str | None = None) -> None:
         """Synchronously ensures the selected SessionDriver is initialized."""
         with self._lock:
-            if self._initialized and self.active_driver().is_active():
+            if self.is_active():
                 return
         self._async_thread.run(self.initialize(app_id=app_id))
 

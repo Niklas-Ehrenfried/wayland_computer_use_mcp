@@ -6,7 +6,6 @@ import asyncio
 import logging
 import os
 import select
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -14,6 +13,7 @@ from typing import Any
 from dbus_fast import Message, MessageType
 from dbus_fast.aio import MessageBus
 
+from wayland_computer_use_mcp._async import PersistentLoop
 from wayland_computer_use_mcp.config import get_config
 from wayland_computer_use_mcp.libei import EIClient
 from wayland_computer_use_mcp.security import global_token_store
@@ -36,41 +36,12 @@ def _debug_log(msg: str) -> None:
             pass
 
 
-class AsyncLoopThread:
-    """Dedicated thread running an asyncio event loop for persistent D-Bus connections."""
+class AsyncLoopThread(PersistentLoop):
+    """Persistent asyncio thread used for long-lived XDG Desktop Portal D-Bus sessions."""
 
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self.loop = asyncio.new_event_loop()
-        self.thread = threading.Thread(target=self._run_loop, name="PortalAsyncLoop", daemon=True)
-        self.thread.start()
-
-    def _run_loop(self) -> None:
-        asyncio.set_event_loop(self.loop)
-        self.loop.run_forever()
-
-    def _ensure_running(self) -> None:
-        with self._lock:
-            if not self.thread.is_alive() or self.loop.is_closed():
-                self.loop = asyncio.new_event_loop()
-                self.thread = threading.Thread(
-                    target=self._run_loop, name="PortalAsyncLoop", daemon=True
-                )
-                self.thread.start()
-
-    def run(self, coro: Any, timeout: float = 120.0) -> Any:
+    def __init__(self, name: str = "PortalAsyncLoop") -> None:
+        super().__init__(name=name)
         self._ensure_running()
-        fut = asyncio.run_coroutine_threadsafe(coro, self.loop)
-        return fut.result(timeout=timeout)
-
-    def stop(self) -> None:
-        with self._lock:
-            if self.loop.is_running():
-                self.loop.call_soon_threadsafe(self.loop.stop)
-            if self.thread.is_alive():
-                self.thread.join(timeout=2.0)
-            if not self.loop.is_running() and not self.loop.is_closed():
-                self.loop.close()
 
 
 class RemoteDesktopClient:

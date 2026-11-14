@@ -24,18 +24,19 @@ def test_window_control_invalid_action():
 
 
 def test_window_control_all_actions(monkeypatch):
-    """Verifies minimize, maximize, restore, focus, close actions dispatch correctly."""
+    """Verifies minimize, maximize, restore, focus, close actions dispatch via active_driver."""
+    from unittest.mock import MagicMock
+
     dispatched_states = []
     activated_pids = []
-
-    monkeypatch.setattr(
-        "wayland_computer_use_mcp.compositors.set_window_state",
-        lambda pid, state: dispatched_states.append((pid, state)) or True,
+    fake_driver = MagicMock()
+    fake_driver.set_window_state.side_effect = lambda pid, state: (
+        dispatched_states.append((pid, state)) or True
     )
-    monkeypatch.setattr(
-        "wayland_computer_use_mcp.compositors.activate_and_raise_window",
-        lambda pid, **kwargs: activated_pids.append(pid) or True,
+    fake_driver.activate_window.side_effect = lambda pid=None, **kwargs: (
+        activated_pids.append(pid) or True
     )
+    monkeypatch.setattr(global_portal_session, "active_driver", lambda: fake_driver)
 
     # 1. Minimize
     res_min = window_control(action="minimize", pid=42)
@@ -70,11 +71,14 @@ def test_window_control_all_actions(monkeypatch):
 
 def test_window_control_default_to_target_pid(monkeypatch):
     """Verifies that if pid is omitted, global_portal_session.target_pid is used."""
+    from unittest.mock import MagicMock
+
     dispatched_states = []
-    monkeypatch.setattr(
-        "wayland_computer_use_mcp.compositors.set_window_state",
-        lambda pid, state: dispatched_states.append((pid, state)) or True,
+    fake_driver = MagicMock()
+    fake_driver.set_window_state.side_effect = lambda pid, state: (
+        dispatched_states.append((pid, state)) or True
     )
+    monkeypatch.setattr(global_portal_session, "active_driver", lambda: fake_driver)
 
     prev_pid = global_portal_session.target_pid
     try:

@@ -252,46 +252,56 @@ class VirtualSessionManager:
             pass
         self.runtime_dir = private_xdg
 
+        comp_env = os.environ.copy()
+        comp_env["XDG_RUNTIME_DIR"] = private_xdg
+        comp_env.pop("AT_SPI_BUS_ADDRESS", None)
+
+        host_link_name: str | None = None
         if cfg.virtual_headed and host_wl:
-            host_sock = os.path.join(host_xdg, host_wl)
+            host_sock = host_wl if os.path.isabs(host_wl) else os.path.join(host_xdg, host_wl)
+            host_link_name = f"host-{os.path.basename(host_wl)}"
             if os.path.exists(host_sock):
                 try:
-                    os.symlink(host_sock, os.path.join(private_xdg, host_wl))
+                    os.symlink(host_sock, os.path.join(private_xdg, host_link_name))
                 except OSError as exc:
                     logger.debug("Failed symlinking host Wayland socket: %s", exc)
-            if socket_name == host_wl:
+            if socket_name == host_wl or socket_name == host_link_name:
                 socket_name = f"{cfg.virtual_wayland_display}-{os.getpid()}"
 
         # Spawn isolated session D-Bus daemon so host apps, AT-SPI, and portals stay isolated
         dbus_addr = self._start_private_dbus(private_xdg)
         self.dbus_address = dbus_addr
 
-        comp_env = os.environ.copy()
-        comp_env["XDG_RUNTIME_DIR"] = private_xdg
-        comp_env.pop("AT_SPI_BUS_ADDRESS", None)
         if dbus_addr:
             comp_env["DBUS_SESSION_BUS_ADDRESS"] = dbus_addr
-        if cfg.virtual_headed and host_wl:
-            comp_env["WAYLAND_DISPLAY"] = host_wl
+        if cfg.virtual_headed and host_link_name:
+            comp_env["WAYLAND_DISPLAY"] = host_link_name
         else:
             comp_env.pop("WAYLAND_DISPLAY", None)
             comp_env.setdefault("WLR_BACKENDS", "headless")
 
         explicit = cfg.virtual_compositor_cmd.strip()
         is_auto = explicit.lower() in ("", DEFAULT_VIRTUAL_CMD)
+        tokens = shlex.split(explicit) if explicit else []
+        is_bare_compositor = len(tokens) == 1 and os.path.basename(tokens[0]) in (
+            "kwin_wayland",
+            "labwc",
+            "sway",
+            "weston",
+        )
         if adapter is None:
             from wayland_computer_use_mcp.blackbox.adapters import select_blackbox_adapter
 
             adapter = select_blackbox_adapter(None if is_auto else explicit)
         self.adapter = adapter
 
-        if is_auto:
+        if is_auto or is_bare_compositor:
             empty_cfg_dir = os.path.join(private_xdg, "compositor-cfg")
             os.makedirs(empty_cfg_dir, exist_ok=True)
             cmd = adapter.build_command(
                 headed=cfg.virtual_headed,
                 socket_name=socket_name,
-                host_wayland_display=host_wl if cfg.virtual_headed else None,
+                host_wayland_display=host_link_name if cfg.virtual_headed else None,
                 config_dir=empty_cfg_dir,
             )
             if not cmd:
@@ -319,7 +329,7 @@ class VirtualSessionManager:
             while time.time() < deadline:
                 if os.path.exists(socket_path):
                     break
-                detected = self._find_created_wayland_socket(private_xdg, exclude=host_wl)
+                detected = self._find_created_wayland_socket(private_xdg)
                 if detected:
                     socket_name = detected
                     socket_path = os.path.join(private_xdg, socket_name)

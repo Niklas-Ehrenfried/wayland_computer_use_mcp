@@ -159,6 +159,8 @@ def terminate(pid: int) -> bool:
     """
     with _lock:
         if pid not in _processes:
+            if pid in _proc_metadata:
+                return True
             raise PermissionError(f"PID {pid} not owned by this session.")
         proc = _processes[pid]
 

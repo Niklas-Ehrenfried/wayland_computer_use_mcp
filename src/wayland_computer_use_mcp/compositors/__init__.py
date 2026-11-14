@@ -102,16 +102,6 @@ def set_window_state(pid: int, state: WindowState) -> bool:
         return False
 
 
-def minimize_window(pid: int) -> bool:
-    """Convenience helper to minimize window."""
-    return set_window_state(pid, "minimize")
-
-
-def restore_window(pid: int) -> bool:
-    """Convenience helper to restore and raise window."""
-    return set_window_state(pid, "restore")
-
-
 async def _ensure_dialogs_above_async() -> bool:
     backend = await get_compositor_backend()
     return await backend.ensure_dialogs_above()
@@ -137,9 +127,7 @@ __all__ = [
     "activate_and_raise_window",
     "ensure_portal_dialogs_above",
     "get_compositor_backend",
-    "minimize_window",
     "query_window_geometry",
     "reset_compositor_backend",
-    "restore_window",
     "set_window_state",
 ]

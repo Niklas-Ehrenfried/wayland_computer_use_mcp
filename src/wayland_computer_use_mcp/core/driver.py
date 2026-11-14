@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from wayland_computer_use_mcp.core.context import InputCapabilities, InputSink, SessionContext
+from wayland_computer_use_mcp.core.context import InputSink, SessionContext
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -38,10 +38,6 @@ class SessionDriver(Protocol):
 
     def get_input_sink(self) -> InputSink | None:
         """Returns active physical/virtual input injector."""
-        ...
-
-    def input_capabilities(self) -> InputCapabilities:
-        """Describes active pointer/keyboard input availability."""
         ...
 
     def capture_output_frame(self) -> Image.Image | None:

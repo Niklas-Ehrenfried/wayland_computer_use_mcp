@@ -19,8 +19,7 @@ from wayland_computer_use_mcp.compositors import (
 )
 from wayland_computer_use_mcp.compositors import (
     ensure_portal_dialogs_above,
-    minimize_window,
-    restore_window,
+    set_window_state,
 )
 from wayland_computer_use_mcp.compositors import (
     query_window_geometry as query_kwin_geometry,
@@ -130,7 +129,7 @@ def test_process_tools_launch_app_clean():
             "wayland_computer_use_mcp.tools.process_tools.launch", return_value=4242
         ) as mock_launch,
         patch("wayland_computer_use_mcp.tools.process_tools.ensure_portal_dialogs_above"),
-        patch("wayland_computer_use_mcp.tools.process_tools._ensure_session_initialized"),
+        patch.object(global_portal_session, "ensure_initialized"),
     ):
         res = launch_app("dummy_app.py", args=["--arg1"])
         assert res["status"] == "launched"
@@ -143,18 +142,18 @@ def test_process_tools_launch_app_with_restart():
     global_portal_session.target_pid = 1111
     with (
         patch("wayland_computer_use_mcp.tools.process_tools.is_responsive", return_value=True),
-        patch("wayland_computer_use_mcp.tools.process_tools.minimize_window") as mock_min,
+        patch.object(global_portal_session.active_driver(), "set_window_state") as mock_min,
         patch(
             "wayland_computer_use_mcp.tools.process_tools.restart_process", return_value=2222
         ) as mock_restart,
         patch("wayland_computer_use_mcp.tools.process_tools.ensure_portal_dialogs_above"),
-        patch("wayland_computer_use_mcp.tools.process_tools._ensure_session_initialized"),
+        patch.object(global_portal_session, "ensure_initialized"),
     ):
         res = launch_app("app.py", restart=True)
         assert res["status"] == "restarted"
         assert res["old_pid"] == 1111
         assert res["pid"] == 2222
-        mock_min.assert_called_once_with(1111)
+        mock_min.assert_called_once_with(1111, "minimize")
         mock_restart.assert_called_once_with(1111)
 
 
@@ -166,10 +165,10 @@ def test_process_tools_restart_app_direct():
     # 2. Managed / MCP-launched PID succeeds
     with (
         patch("wayland_computer_use_mcp.process._processes", {1234: None}),
-        patch("wayland_computer_use_mcp.tools.process_tools.minimize_window"),
+        patch.object(global_portal_session.active_driver(), "set_window_state"),
         patch("wayland_computer_use_mcp.tools.process_tools.restart_process", return_value=3333),
         patch("wayland_computer_use_mcp.tools.process_tools.ensure_portal_dialogs_above"),
-        patch("wayland_computer_use_mcp.tools.process_tools._ensure_session_initialized"),
+        patch.object(global_portal_session, "ensure_initialized"),
     ):
         res = restart_app(1234)
         assert res["status"] == "restarted"
@@ -227,8 +226,8 @@ def test_kwin_window_helpers():
         return_value=True,
     ):
         assert ensure_portal_dialogs_above() is True
-        assert minimize_window(9876) is True
-        assert restore_window(9876) is True
+        assert set_window_state(9876, "minimize") is True
+        assert set_window_state(9876, "restore") is True
 
 
 # =========================================================================

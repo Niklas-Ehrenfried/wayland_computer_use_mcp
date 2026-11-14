@@ -51,16 +51,6 @@ class SessionContext:
         return env
 
 
-@dataclass(frozen=True)
-class InputCapabilities:
-    """Advertises what physical/virtual input devices an active session supports."""
-
-    has_absolute_pointer: bool = False
-    has_relative_pointer: bool = False
-    has_keyboard: bool = False
-    is_isolated: bool = False
-
-
 @runtime_checkable
 class InputSink(Protocol):
     """Protocol shared by libei EIClient and Wayland virtual-input wire backends."""

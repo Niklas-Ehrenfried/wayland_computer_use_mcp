@@ -8,7 +8,6 @@ from typing import Any
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from wayland_computer_use_mcp.compositors import minimize_window
 from wayland_computer_use_mcp.config import get_config
 from wayland_computer_use_mcp.portal import global_portal_session
 from wayland_computer_use_mcp.process import (
@@ -30,9 +29,14 @@ def ensure_portal_dialogs_above() -> bool:
     return global_portal_session.active_driver().ensure_dialogs_above()
 
 
-def _ensure_session_initialized() -> None:
-    if not global_portal_session.is_active():
-        global_portal_session.ensure_initialized()
+def _lifecycle_metadata(elements: list[dict[str, Any]]) -> dict[str, Any]:
+    meta = global_portal_session.metadata()
+    return {
+        "session_handle": meta.get("session_handle"),
+        "restore_token": meta.get("restore_token"),
+        "eis_connected": bool(meta.get("eis_connected", False)),
+        "interactive_elements": elements,
+    }
 
 
 def _bind_focus_and_collect_elements(pid: int) -> list[dict[str, Any]]:
@@ -71,21 +75,17 @@ def launch_app(
 
     current_pid = global_portal_session.target_pid
     if restart and current_pid and is_responsive(current_pid):
-        _ensure_session_initialized()
+        global_portal_session.ensure_initialized()
         try:
-            minimize_window(current_pid)
+            global_portal_session.active_driver().set_window_state(current_pid, "minimize")
             new_pid = restart_process(current_pid)
             initial_elements = _bind_focus_and_collect_elements(new_pid)
-            meta = global_portal_session.metadata()
             return {
                 "status": "restarted",
                 "old_pid": current_pid,
                 "pid": new_pid,
                 "target": target,
-                "session_handle": meta.get("session_handle"),
-                "restore_token": meta.get("restore_token"),
-                "eis_connected": bool(meta.get("eis_connected", False)),
-                "interactive_elements": initial_elements,
+                **_lifecycle_metadata(initial_elements),
             }
         except Exception as exc:
             logger.warning("Hot restart failed, falling back to clean launch: %s", exc)
@@ -99,7 +99,7 @@ def launch_app(
         and not cfg.mock_mode
     )
     if not defer_portal_init:
-        _ensure_session_initialized()
+        global_portal_session.ensure_initialized()
 
     pid = launch(target, args or [], cwd)
     if defer_portal_init:
@@ -107,7 +107,7 @@ def launch_app(
 
         time.sleep(0.5)
         try:
-            _ensure_session_initialized()
+            global_portal_session.ensure_initialized()
         except Exception:
             try:
                 terminate(pid)
@@ -117,17 +117,13 @@ def launch_app(
 
     initial_elements = _bind_focus_and_collect_elements(pid)
 
-    meta = global_portal_session.metadata()
     return {
         "status": "launched",
         "pid": pid,
         "target": target,
         "args": args or [],
         "cwd": cwd,
-        "session_handle": meta.get("session_handle"),
-        "restore_token": meta.get("restore_token"),
-        "eis_connected": bool(meta.get("eis_connected", False)),
-        "interactive_elements": initial_elements,
+        **_lifecycle_metadata(initial_elements),
     }
 
 
@@ -154,24 +150,20 @@ def restart_app(pid: int | None = None) -> dict[str, Any]:
             "consistency of user applications."
         )
 
-    minimize_window(effective_pid)
+    global_portal_session.active_driver().set_window_state(effective_pid, "minimize")
     cfg = get_config()
     if not cfg.mock_mode and not cfg.lazy_portal:
         ensure_portal_dialogs_above()
-    _ensure_session_initialized()
+    global_portal_session.ensure_initialized()
 
     new_pid = restart_process(effective_pid)
     initial_elements = _bind_focus_and_collect_elements(new_pid)
 
-    meta = global_portal_session.metadata()
     return {
         "status": "restarted",
         "old_pid": effective_pid,
         "new_pid": new_pid,
-        "session_handle": meta.get("session_handle"),
-        "restore_token": meta.get("restore_token"),
-        "eis_connected": bool(meta.get("eis_connected", False)),
-        "interactive_elements": initial_elements,
+        **_lifecycle_metadata(initial_elements),
     }
 
 

@@ -18,6 +18,7 @@ from wayland_computer_use_mcp.core.wayland_wire import (
     connect_and_discover_globals,
     create_shm_fd,
     send_with_fd,
+    unpack_string,
 )
 from wayland_computer_use_mcp.libei import (
     BTN_LEFT,
@@ -238,6 +239,18 @@ def _generate_default_xkb_keymap() -> str | None:
         xkb.xkb_context_unref(ctx)
 
 
+_MOD_MASKS: dict[int, int] = {
+    42: 1,  # KEY_LEFTSHIFT -> Shift
+    54: 1,  # KEY_RIGHTSHIFT -> Shift
+    29: 4,  # KEY_LEFTCTRL -> Control
+    97: 4,  # KEY_RIGHTCTRL -> Control
+    56: 8,  # KEY_LEFTALT -> Mod1
+    125: 64,  # KEY_LEFTMETA -> Mod4
+    126: 64,  # KEY_RIGHTMETA -> Mod4
+    100: 128,  # KEY_RIGHTALT -> Mod5 (Level3)
+}
+
+
 class WlrVirtualInputClient:
     """InputSink backed by zwlr_virtual_pointer_v1 + zwp_virtual_keyboard_v1."""
 
@@ -251,6 +264,7 @@ class WlrVirtualInputClient:
         self._vptr_id: int = 0
         self._vkbd_id: int = 0
         self._xkb_charmap: dict[str, tuple[int, bool, bool]] = {}
+        self._held_mods: set[int] = set()
         self.has_absolute_pointer: bool = False
         self.has_scroll: bool = False
         self.keyboard_device: Any = None
@@ -265,20 +279,27 @@ class WlrVirtualInputClient:
         return int((time.monotonic() - self._t0) * 1000) & 0xFFFFFFFF
 
     def _connect(self, sock_path: str) -> None:
-        sock, globals_map, _buf, _fds, next_id = connect_and_discover_globals(
-            sock_path, timeout=1.0
-        )
+        sock, globals_map, buf, _fds, next_id = connect_and_discover_globals(sock_path, timeout=1.0)
         try:
             seat = globals_map.get("wl_seat")
+            out_global = globals_map.get("wl_output")
             vptr_mgr = globals_map.get("zwlr_virtual_pointer_manager_v1")
             vkbd_mgr = globals_map.get("zwp_virtual_keyboard_manager_v1")
 
             reqs = b""
             seat_id = 0
+            out_id = 0
             if seat:
                 seat_id = next_id
                 next_id += 1
                 reqs += bind_global_req(2, seat[0], "wl_seat", 1, seat_id)
+
+            if out_global:
+                out_id = next_id
+                next_id += 1
+                reqs += bind_global_req(
+                    2, out_global[0], "wl_output", min(out_global[1], 2), out_id
+                )
 
             if vptr_mgr:
                 mgr_id = next_id
@@ -307,6 +328,8 @@ class WlrVirtualInputClient:
                 return
 
             sock.sendall(reqs)
+            if out_id:
+                self._read_output_extent(sock, buf, out_id)
             if self._vkbd_id:
                 kmap_str = _generate_default_xkb_keymap()
                 if kmap_str:
@@ -332,6 +355,37 @@ class WlrVirtualInputClient:
                 pass
             self.has_absolute_pointer = False
             self.keyboard_device = None
+
+    def _read_output_extent(self, sock: Any, buf: bytearray, out_id: int) -> None:
+        """Reads wl_output.mode dimensions so absolute pointer extents match output pixels."""
+        deadline = time.monotonic() + 0.15
+        while time.monotonic() < deadline:
+            rlist, _, _ = select.select([sock], [], [], 0.05)
+            if not rlist:
+                continue
+            data = sock.recv(16384)
+            if not data:
+                break
+            buf.extend(data)
+            done = False
+            while len(buf) >= 8:
+                oid, sz_op = struct.unpack_from("<II", buf, 0)
+                sz = sz_op >> 16
+                op = sz_op & 0xFFFF
+                if sz < 8 or len(buf) < sz:
+                    break
+                body = bytes(buf[8:sz])
+                del buf[:sz]
+                if oid == out_id and op == 1 and len(body) >= 12:  # mode(flags, w, h, refresh)
+                    flags, w, h = struct.unpack_from("<Iii", body, 0)
+                    if w > 0 and h > 0 and ((flags & 1) or self.extent_w == 1280):
+                        self.extent_w = w
+                        self.extent_h = h
+                elif oid == out_id and op == 2:  # done
+                    done = True
+                    break
+            if done:
+                break
 
     def _send(self, data: bytes) -> bool:
         if self._sock is None:
@@ -424,13 +478,21 @@ class WlrVirtualInputClient:
         return None
 
     def _emit_key(self, keycode: int, pressed: bool) -> bool:
-        return self._send(
-            build_msg(
-                self._vkbd_id,
-                1,
-                struct.pack("<III", self._ts_ms(), keycode, 1 if pressed else 0),
-            )
+        pkt = build_msg(
+            self._vkbd_id,
+            1,
+            struct.pack("<III", self._ts_ms(), keycode, 1 if pressed else 0),
         )
+        if keycode in _MOD_MASKS:
+            if pressed:
+                self._held_mods.add(keycode)
+            else:
+                self._held_mods.discard(keycode)
+            depressed = 0
+            for code in self._held_mods:
+                depressed |= _MOD_MASKS.get(code, 0)
+            pkt += build_msg(self._vkbd_id, 2, struct.pack("<IIII", depressed, 0, 0, 0))
+        return self._send(pkt)
 
     def type_char(self, ch: str) -> bool:
         if not self._vkbd_id:
@@ -492,3 +554,178 @@ class WlrVirtualInputClient:
         self.has_absolute_pointer = False
         self.has_scroll = False
         self.keyboard_device = None
+
+
+def _select_toplevel_handle(
+    handles: dict[int, dict[str, Any]],
+    order: list[int],
+    title: str | None = None,
+    app_hint: str | None = None,
+) -> int | None:
+    """Selects best open foreign-toplevel handle matching title or app_hint."""
+    open_ids = [hid for hid in order if not handles[hid]["closed"]]
+    if not open_ids:
+        return None
+    if title:
+        needle = title.lower()
+        for hid in open_ids:
+            info = handles[hid]
+            if needle in info["title"].lower() or needle in info["app_id"].lower():
+                return hid
+    if app_hint:
+        needle = app_hint.lower()
+        for hid in open_ids:
+            info = handles[hid]
+            if needle in info["app_id"].lower() or needle in info["title"].lower():
+                return hid
+    if len(open_ids) == 1 or (not title and not app_hint):
+        return open_ids[-1]
+    return None
+
+
+def control_wlr_toplevel(
+    sock_path: str,
+    action: str,
+    title: str | None = None,
+    app_hint: str | None = None,
+    timeout: float = 1.0,
+) -> bool:
+    """Controls a window via zwlr_foreign_toplevel_management_v1 (labwc/sway/wlroots)."""
+    norm = action.strip().lower()
+    if norm not in {"minimize", "maximize", "restore", "focus", "close"}:
+        return False
+    if not sock_path or not os.path.exists(sock_path):
+        return False
+
+    sock, globals_map, buf, _fds, next_id = connect_and_discover_globals(sock_path, timeout=timeout)
+    try:
+        mgr_entry = globals_map.get("zwlr_foreign_toplevel_manager_v1")
+        if mgr_entry is None:
+            return False
+
+        mgr_name, mgr_ver = mgr_entry
+        mgr_id = next_id
+        next_id += 1
+
+        reqs = bind_global_req(
+            2, mgr_name, "zwlr_foreign_toplevel_manager_v1", min(mgr_ver, 3), mgr_id
+        )
+        seat_id = 0
+        seat_entry = globals_map.get("wl_seat")
+        if seat_entry is not None:
+            seat_id = next_id
+            next_id += 1
+            reqs += bind_global_req(2, seat_entry[0], "wl_seat", 1, seat_id)
+        sync_cb_id = next_id
+        next_id += 1
+        reqs += build_msg(1, 0, struct.pack("<I", sync_cb_id))
+        sock.sendall(reqs)
+
+        handles: dict[int, dict[str, Any]] = {}
+        order: list[int] = []
+        synced = False
+        deadline = time.monotonic() + timeout
+
+        def _open_all_done() -> bool:
+            open_handles = [handles[h] for h in order if not handles[h]["closed"]]
+            return bool(open_handles) and all(h["done"] for h in open_handles)
+
+        while time.monotonic() < deadline and not (synced and _open_all_done()):
+            rlist, _, _ = select.select([sock], [], [], 0.1)
+            if not rlist:
+                if synced:
+                    break
+                continue
+            data = sock.recv(65536)
+            if not data:
+                break
+            buf.extend(data)
+            while len(buf) >= 8:
+                oid, sz_op = struct.unpack_from("<II", buf, 0)
+                sz = sz_op >> 16
+                op = sz_op & 0xFFFF
+                if sz < 8 or len(buf) < sz:
+                    break
+                body = bytes(buf[8:sz])
+                del buf[:sz]
+                if oid == sync_cb_id and op == 0:
+                    synced = True
+                elif oid == mgr_id and op == 0 and len(body) >= 4:
+                    (handle_id,) = struct.unpack_from("<I", body, 0)
+                    if handle_id not in handles:
+                        handles[handle_id] = {
+                            "title": "",
+                            "app_id": "",
+                            "done": False,
+                            "closed": False,
+                        }
+                        order.append(handle_id)
+                elif oid in handles:
+                    entry = handles[oid]
+                    if op == 0 and len(body) >= 4:
+                        entry["title"], _ = unpack_string(body, 0)
+                    elif op == 1 and len(body) >= 4:
+                        entry["app_id"], _ = unpack_string(body, 0)
+                    elif op == 5:
+                        entry["done"] = True
+                    elif op == 6:
+                        entry["closed"] = True
+
+        target_id = _select_toplevel_handle(handles, order, title=title, app_hint=app_hint)
+        if target_id is None:
+            sock.sendall(build_msg(mgr_id, 0))
+            return False
+
+        action_msgs = b""
+        if norm == "minimize":
+            action_msgs = build_msg(target_id, 2)
+        elif norm == "maximize":
+            action_msgs = build_msg(target_id, 0)
+        elif norm == "restore":
+            action_msgs = build_msg(target_id, 3) + build_msg(target_id, 1)
+            if seat_id:
+                action_msgs += build_msg(target_id, 4, struct.pack("<I", seat_id))
+        elif norm == "focus":
+            if not seat_id:
+                return False
+            action_msgs = build_msg(target_id, 3) + build_msg(
+                target_id, 4, struct.pack("<I", seat_id)
+            )
+        elif norm == "close":
+            action_msgs = build_msg(target_id, 5)
+
+        flush_cb_id = next_id
+        next_id += 1
+        sock.sendall(
+            action_msgs + build_msg(mgr_id, 0) + build_msg(1, 0, struct.pack("<I", flush_cb_id))
+        )
+
+        flush_deadline = time.monotonic() + min(0.4, timeout)
+        flushed = False
+        while not flushed and time.monotonic() < flush_deadline:
+            rlist, _, _ = select.select([sock], [], [], 0.05)
+            if not rlist:
+                continue
+            data = sock.recv(65536)
+            if not data:
+                break
+            buf.extend(data)
+            while len(buf) >= 8:
+                oid, sz_op = struct.unpack_from("<II", buf, 0)
+                sz = sz_op >> 16
+                op = sz_op & 0xFFFF
+                if sz < 8 or len(buf) < sz:
+                    break
+                del buf[:sz]
+                if oid == flush_cb_id and op == 0:
+                    flushed = True
+                    break
+        return True
+    except Exception as exc:
+        logger.debug("control_wlr_toplevel failed: %s", exc)
+        return False
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass

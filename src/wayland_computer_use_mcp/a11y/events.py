@@ -161,11 +161,6 @@ class AtspiEventListener:
                 return list(self._events)
             return [e for e in self._events if e["timestamp"] >= since_timestamp]
 
-    def clear_events(self) -> None:
-        with self._lock:
-            self._events.clear()
-            self._last_event_time = time.time()
-
     def wait_for_settled(
         self,
         timeout_ms: int = 500,

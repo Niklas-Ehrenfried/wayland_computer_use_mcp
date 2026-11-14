@@ -12,12 +12,6 @@ from mcp.types import ImageContent, TextContent, ToolAnnotations
 
 from wayland_computer_use_mcp.a11y import get_application_tree
 from wayland_computer_use_mcp.artifacts import get_artifacts_dir
-from wayland_computer_use_mcp.compositors import (
-    activate_and_raise_window as set_kwin_keep_above,
-)
-from wayland_computer_use_mcp.compositors import (
-    query_window_geometry as query_kwin_geometry,
-)
 from wayland_computer_use_mcp.portal import (
     global_portal_session,
 )
@@ -27,11 +21,6 @@ from wayland_computer_use_mcp.security import (
 )
 
 logger = logging.getLogger("wayland_computer_use_mcp.tools.visual")
-
-
-def _ensure_session_initialized() -> None:
-    if not global_portal_session.is_active():
-        global_portal_session.ensure_initialized()
 
 
 class CapturedFrameResult(list):
@@ -101,7 +90,8 @@ def focus_window(pid: int | None = None) -> dict[str, Any]:
     if title:
         global_portal_session.target_title = title
 
-    geom = query_kwin_geometry(pid=effective_pid, title=title)
+    driver = global_portal_session.active_driver()
+    geom = driver.query_window_geometry(pid=effective_pid, title=title)
     if geom:
         wx, wy, ww, wh = geom
         global_clamper.set_bounds(ww, wh)
@@ -115,7 +105,7 @@ def focus_window(pid: int | None = None) -> dict[str, Any]:
             global_clamper.set_bounds(bounds[2], bounds[3])
             global_geometry_detector.record_capture(bounds[2], bounds[3], 0, 0)
 
-    set_kwin_keep_above(pid=effective_pid, title=title)
+    driver.activate_window(pid=effective_pid, title=title)
 
     return {
         "pid": effective_pid,
@@ -132,7 +122,7 @@ def capture_window_frame(
     pid: int | None = None,
 ) -> list[Any]:
     """Captures window frame as in-memory ImageContent (saves PNG when save_artifact=True)."""
-    _ensure_session_initialized()
+    global_portal_session.ensure_initialized()
     effective_pid = pid or global_portal_session.target_pid
     if effective_pid:
         global_portal_session.target_pid = effective_pid

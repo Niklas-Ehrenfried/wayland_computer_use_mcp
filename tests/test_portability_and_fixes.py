@@ -168,9 +168,9 @@ def test_launch_app_live_mode_launches_before_portal_prompt(monkeypatch):
             process_tools, "launch", lambda t, a, c: call_order.append("launch") or 555
         )
         monkeypatch.setattr(
-            process_tools,
-            "_ensure_session_initialized",
-            lambda: call_order.append("portal"),
+            global_portal_session,
+            "ensure_initialized",
+            lambda app_id=None: call_order.append("portal"),
         )
         monkeypatch.setattr(process_tools, "_bind_focus_and_collect_elements", lambda pid: [])
 
@@ -181,9 +181,9 @@ def test_launch_app_live_mode_launches_before_portal_prompt(monkeypatch):
         # Verify spawned app is cleaned up if user cancels the portal prompt
         call_order.clear()
         monkeypatch.setattr(
-            process_tools,
-            "_ensure_session_initialized",
-            lambda: (_ for _ in ()).throw(RuntimeError("cancelled")),
+            global_portal_session,
+            "ensure_initialized",
+            lambda app_id=None: (_ for _ in ()).throw(RuntimeError("cancelled")),
         )
         monkeypatch.setattr(process_tools, "terminate", lambda pid: terminated.append(pid))
         with pytest.raises(RuntimeError, match="cancelled"):
@@ -809,7 +809,7 @@ def test_virtual_session_manager_isolates_and_restores_env(monkeypatch, tmp_path
         assert sub_env["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/tmp/isolated-dbus-test"
         assert sub_env["WAYLAND_DISPLAY"] == "wayland-mcp-virtual"
         assert "AT_SPI_BUS_ADDRESS" not in sub_env
-        assert os.path.islink(os.path.join(mgr.runtime_dir or "", "wayland-0"))
+        assert os.path.islink(os.path.join(mgr.runtime_dir or "", "host-wayland-0"))
         assert len(spawned) == 2
         # Host process os.environ must remain untouched
         assert os.environ["XDG_RUNTIME_DIR"] == str(host_xdg)

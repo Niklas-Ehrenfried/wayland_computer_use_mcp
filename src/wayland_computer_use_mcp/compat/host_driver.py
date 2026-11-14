@@ -11,7 +11,7 @@ from PIL import Image
 
 import wayland_computer_use_mcp.compositors as compositors_pkg
 from wayland_computer_use_mcp.config import get_config
-from wayland_computer_use_mcp.core.context import InputCapabilities, InputSink, SessionContext
+from wayland_computer_use_mcp.core.context import InputSink, SessionContext
 from wayland_computer_use_mcp.libei import BTN_LEFT, EIClient
 from wayland_computer_use_mcp.portal.remotedesktop import (
     AsyncLoopThread,
@@ -203,15 +203,6 @@ class HostPassthroughDriver:
         if self.rd_client.ei_client is None:
             self.rd_client.ei_client = EIClient(fd=None)
         return self._sink
-
-    def input_capabilities(self) -> InputCapabilities:
-        ei = self.rd_client.ei_client
-        return InputCapabilities(
-            has_absolute_pointer=self._sink.has_absolute_pointer,
-            has_relative_pointer=bool(ei and getattr(ei, "relative_device", None) is not None),
-            has_keyboard=bool(self._sink.keyboard_device is not None),
-            is_isolated=False,
-        )
 
     def capture_output_frame(self) -> Image.Image | None:
         return self.screencast.pull_frame()

@@ -14,10 +14,14 @@ Launches examples/test_gui_app.py on the desktop, tests:
 6. Crash-to-context exception interception (traceback captured from stderr)
 """
 
+import os
+import shutil
 import time
 
 import pytest
 
+from wayland_computer_use_mcp.config import Config, get_config, set_config
+from wayland_computer_use_mcp.portal import global_portal_session
 from wayland_computer_use_mcp.process import is_responsive
 from wayland_computer_use_mcp.server import (
     batch_actions,
@@ -30,15 +34,30 @@ from wayland_computer_use_mcp.server import (
 )
 
 
-@pytest.mark.live
-def test_visible_interactive_gui_workflow():
-    # 1. Launch test GUI application on the desktop in test mode
-    launch_res = launch_app("examples/test_gui_app.py", args=["--test-mode"])
-    assert launch_res["status"] == "launched"
-    pid = launch_res["pid"]
-    assert pid > 0
+def _has_blackbox_compositor() -> bool:
+    return any(shutil.which(cmd) for cmd in ("kwin_wayland", "labwc", "sway", "weston"))
 
+
+@pytest.mark.live
+@pytest.mark.skipif(
+    not _has_blackbox_compositor() or not shutil.which("dbus-daemon"),
+    reason="Requires a Blackbox nested compositor (kwin_wayland/labwc/sway) and dbus-daemon",
+)
+def test_visible_interactive_gui_workflow():
+    prev_cfg = get_config()
+    cfg = Config(
+        display_mode="virtual",
+        virtual_headed=bool(os.environ.get("WAYLAND_DISPLAY")),
+        mock_mode=False,
+    )
+    set_config(cfg)
+    pid: int | None = None
     try:
+        # 1. Launch test GUI application inside the Blackbox virtual window in test mode
+        launch_res = launch_app("examples/test_gui_app.py", args=["--test-mode"])
+        assert launch_res["status"] == "launched"
+        pid = launch_res["pid"]
+        assert pid > 0
         # Allow GTK window to map and paint
         time.sleep(1.2)
 
@@ -164,9 +183,15 @@ def test_visible_interactive_gui_workflow():
         assert "[TestRig]" in logs or len(logs) >= 0
 
     finally:
-        # 13. Clean termination
-        term_res = terminate_app(pid)
-        assert term_res["status"] == "terminated"
+        # 13. Clean termination & Blackbox teardown
+        if pid is not None:
+            try:
+                term_res = terminate_app(pid)
+                assert term_res["status"] == "terminated"
+            except Exception:
+                pass
+        global_portal_session.close()
+        set_config(prev_cfg)
 
 
 if __name__ == "__main__":

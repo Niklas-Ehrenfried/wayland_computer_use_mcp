@@ -12,10 +12,14 @@ Fully covers the 9 actionable UI components:
 9. Crash-to-Context: Click crash button -> Traceback intercepted and bound
 """
 
+import os
+import shutil
 import time
 
 import pytest
 
+from wayland_computer_use_mcp.config import Config, get_config, set_config
+from wayland_computer_use_mcp.portal import global_portal_session
 from wayland_computer_use_mcp.process import is_responsive
 from wayland_computer_use_mcp.server import (
     batch_actions,
@@ -33,21 +37,40 @@ from wayland_computer_use_mcp.server import (
 pytestmark = pytest.mark.live
 
 
+def _has_blackbox_compositor() -> bool:
+    return any(shutil.which(cmd) for cmd in ("kwin_wayland", "labwc", "sway", "weston"))
+
+
 @pytest.fixture(scope="module")
 def live_app():
-    """Launches the multi-tab test GUI once for the entire module to prevent window flickering."""
-    res = launch_app("examples/test_gui_app.py", args=["--test-mode"])
-    assert res["status"] == "launched"
-    pid = res["pid"]
-    assert pid > 0
-    time.sleep(0.6)  # Allow window to map, paint, and register with AT-SPI & KWin
+    """Launches the test GUI inside the Blackbox virtual window once for this module."""
+    if not _has_blackbox_compositor() or not shutil.which("dbus-daemon"):
+        pytest.skip("Requires a Blackbox nested compositor (kwin_wayland/labwc/sway) & dbus-daemon")
 
-    yield pid
-
+    prev_cfg = get_config()
+    set_config(
+        Config(
+            display_mode="virtual",
+            virtual_headed=bool(os.environ.get("WAYLAND_DISPLAY")),
+            mock_mode=False,
+        )
+    )
+    pid: int | None = None
     try:
-        terminate_app(pid)
-    except Exception:
-        pass
+        res = launch_app("examples/test_gui_app.py", args=["--test-mode"])
+        assert res["status"] == "launched"
+        pid = int(res["pid"])
+        assert pid > 0
+        time.sleep(0.6)  # Allow window to map, paint, and register with AT-SPI & compositor
+        yield pid
+    finally:
+        if pid is not None:
+            try:
+                terminate_app(pid)
+            except Exception:
+                pass
+        global_portal_session.close()
+        set_config(prev_cfg)
 
 
 def test_01_launch_and_liveness(live_app: int):
