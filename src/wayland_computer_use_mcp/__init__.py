@@ -8,7 +8,7 @@ from pathlib import Path
 try:
     __version__ = _pkg_version("wayland-computer-use-mcp")
 except PackageNotFoundError:
-    __version__ = "0.1.1"
+    __version__ = "0.2.0"
 
 # Auto-detect standard Wayland and D-Bus session variables if stripped by MCP runner
 uid = os.getuid() if hasattr(os, "getuid") else 1000

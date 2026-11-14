@@ -19,7 +19,7 @@ from wayland_computer_use_mcp.tools.process_tools import launch_app
 
 
 def test_package_version_synced():
-    assert __version__ == "0.1.1"
+    assert __version__ == "0.2.0"
 
 
 def test_bundled_system_prompt_loads_and_accurate(monkeypatch):
