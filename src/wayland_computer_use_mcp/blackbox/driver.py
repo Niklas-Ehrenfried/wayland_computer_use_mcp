@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from PIL import Image
 
@@ -14,7 +14,9 @@ from wayland_computer_use_mcp.blackbox.adapters import (
 )
 from wayland_computer_use_mcp.config import DEFAULT_VIRTUAL_CMD, get_config
 from wayland_computer_use_mcp.core.context import InputSink, SessionContext
-from wayland_computer_use_mcp.portal.virtual import VirtualSessionManager
+
+if TYPE_CHECKING:
+    from wayland_computer_use_mcp.portal.virtual import VirtualSessionManager
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +27,11 @@ class BlackboxDriver:
     name: str = "blackbox"
 
     def __init__(self, sandbox: VirtualSessionManager | None = None) -> None:
-        self.sandbox = sandbox or VirtualSessionManager()
+        if sandbox is None:
+            from wayland_computer_use_mcp.portal.virtual import VirtualSessionManager
+
+            sandbox = VirtualSessionManager()
+        self.sandbox = sandbox
         self._adapter: BlackboxCompositorAdapter | None = None
         self._input_sink: InputSink | None = None
         self._backend_kind: str = "uninitialized"

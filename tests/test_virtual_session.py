@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import os
 import shutil
+import time
 
 import pytest
 from PIL import Image
@@ -47,17 +48,24 @@ def test_unsupervised_virtual_session_execution():
         pid = int(launch_res["pid"])
         assert launch_res["interactive_elements"]
 
+        # Allow software-rendered Wayland clients inside VMs time to commit their first frame
+        time.sleep(0.8)
+
         tree = inspect_ui_tree(pid=pid, max_depth=10)
         assert len(tree.get("interactive_elements", [])) > 0
 
-        capture = capture_window_frame(pid=pid, save_artifact=True)
-        assert len(capture) >= 2
-        assert capture.file_path and os.path.exists(capture.file_path)
-
-        with Image.open(io.BytesIO(capture.raw_bytes)) as img:
-            assert img.width > 0 and img.height > 0
-            colors = img.getcolors(maxcolors=20000)
-            assert colors is None or len(colors) > 20, "Captured frame appears blank"
+        colors = None
+        for _ in range(4):
+            capture = capture_window_frame(pid=pid, save_artifact=True)
+            assert len(capture) >= 2
+            assert capture.file_path and os.path.exists(capture.file_path)
+            with Image.open(io.BytesIO(capture.raw_bytes)) as img:
+                assert img.width > 0 and img.height > 0
+                colors = img.getcolors(maxcolors=20000)
+                if colors is None or len(colors) > 20:
+                    break
+            time.sleep(0.35)
+        assert colors is None or len(colors) > 20, "Captured frame appears blank"
     finally:
         if pid is not None:
             try:

@@ -72,8 +72,8 @@ def decode_shm_frame(
     return img
 
 
-def capture_wlr_screencopy(sock_path: str, timeout: float = 2.0) -> Image.Image | None:
-    """Captures an output frame via zwlr_screencopy_manager_v1 without external binaries."""
+def _capture_wlr_screencopy_once(sock_path: str, timeout: float = 2.0) -> Image.Image | None:
+    """Captures one output frame via zwlr_screencopy_manager_v1 without external binaries."""
     if not sock_path or not os.path.exists(sock_path):
         return None
 
@@ -179,6 +179,23 @@ def capture_wlr_screencopy(sock_path: str, timeout: float = 2.0) -> Image.Image 
             sock.close()
         except OSError:
             pass
+
+
+def capture_wlr_screencopy(sock_path: str, timeout: float = 2.0) -> Image.Image | None:
+    """Captures an output frame via zwlr_screencopy_manager_v1, retrying cold-start black frames."""
+    deadline = time.monotonic() + timeout
+    img: Image.Image | None = None
+    for attempt in range(4):
+        remaining = max(0.2, deadline - time.monotonic())
+        img = _capture_wlr_screencopy_once(sock_path, timeout=remaining)
+        if img is None:
+            return None
+        # Retry briefly if compositor hasn't received the client's first surface commit yet
+        if img.getextrema() != ((0, 0), (0, 0), (0, 0)):
+            return img
+        if attempt < 3 and time.monotonic() + 0.25 < deadline:
+            time.sleep(0.25)
+    return img
 
 
 def _generate_default_xkb_keymap() -> str | None:
@@ -448,17 +465,27 @@ class WlrVirtualInputClient:
         time.sleep(0.04)
         return self.button_click(button_code)
 
+    @staticmethod
+    def _scroll_steps(delta: float) -> int:
+        if delta == 0:
+            return 0
+        if abs(delta) >= 50:
+            return int(round(delta / 100.0))
+        return 1 if delta > 0 else -1
+
     def scroll(self, dx: float, dy: float) -> bool:
         if not self._vptr_id:
             return False
         pkt = b""
         ts = self._ts_ms()
-        if dy:
-            fixed_y = int(round(dy * 15 * 256))
-            pkt += build_msg(self._vptr_id, 3, struct.pack("<IIi", ts, 0, fixed_y))
-        if dx:
-            fixed_x = int(round(dx * 15 * 256))
-            pkt += build_msg(self._vptr_id, 3, struct.pack("<IIi", ts, 1, fixed_x))
+        steps_y = self._scroll_steps(dy)
+        steps_x = self._scroll_steps(dx)
+        if steps_y or steps_x:
+            pkt += build_msg(self._vptr_id, 5, struct.pack("<I", 0))  # axis_source=wheel
+        if steps_y:
+            pkt += build_msg(self._vptr_id, 3, struct.pack("<IIi", ts, 0, steps_y * 15 * 256))
+        if steps_x:
+            pkt += build_msg(self._vptr_id, 3, struct.pack("<IIi", ts, 1, steps_x * 15 * 256))
         if not pkt:
             return True
         return self._send(pkt + build_msg(self._vptr_id, 4))

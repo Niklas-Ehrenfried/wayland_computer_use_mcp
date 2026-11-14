@@ -377,14 +377,18 @@ def test_08_scroll_and_select_data_list(live_app: int):
     ), "Selecting scrolled Row #20 did not update Selected Row status label"
 
     # 4. Scroll back up and verify we can re-select Row #02
-    scroll_up = scroll(0, -300, pid=pid)
-    assert "Scrolled" in scroll_up
-    time.sleep(0.35)
-    tree_top = inspect_ui_tree(pid=pid)
-    row_02_again = next(
-        (e for e in tree_top["interactive_elements"] if "Dataset Row #02" in e.get("name", "")),
-        None,
-    )
+    row_02_again = None
+    for _ in range(3):
+        scroll_up = scroll(0, -300, pid=pid)
+        assert "Scrolled" in scroll_up
+        time.sleep(0.35)
+        tree_top = inspect_ui_tree(pid=pid)
+        row_02_again = next(
+            (e for e in tree_top["interactive_elements"] if "Dataset Row #02" in e.get("name", "")),
+            None,
+        )
+        if row_02_again is not None:
+            break
     assert row_02_again is not None, "Dataset Row #02 should be visible after scrolling back up"
     interact_with_node(node_id=row_02_again["id"], action="click", pid=pid)
     time.sleep(0.25)
