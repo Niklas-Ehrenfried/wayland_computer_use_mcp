@@ -104,7 +104,7 @@ def test_protocol_conformance_drivers_and_sinks():
         async_thread.stop()
 
 
-def test_adapter_selection_and_commands(monkeypatch):
+def test_adapter_selection_and_commands(monkeypatch, tmp_path):
     assert isinstance(select_blackbox_adapter("kwin_wayland --virtual"), KWinNestedAdapter)
     assert isinstance(select_blackbox_adapter("sway"), WlrootsNestedAdapter)
     assert isinstance(select_blackbox_adapter("labwc"), WlrootsNestedAdapter)
@@ -124,6 +124,13 @@ def test_adapter_selection_and_commands(monkeypatch):
     )
     monkeypatch.setattr("shutil.which", lambda n: "/usr/bin/sway" if n == "sway" else None)
     assert WlrootsNestedAdapter().build_command(True, "x", "wayland-0") == "sway -c /dev/null"
+    sway_cfg_dir = tmp_path / "sway-cfg"
+    sway_cfg_dir.mkdir()
+    sway_cmd = WlrootsNestedAdapter().build_command(
+        True, "x", "wayland-0", config_dir=str(sway_cfg_dir)
+    )
+    assert sway_cmd == f"sway -c {sway_cfg_dir / 'sway.conf'}"
+    assert "default_border none" in (sway_cfg_dir / "sway.conf").read_text(encoding="utf-8")
 
     monkeypatch.setattr("shutil.which", lambda n: "/usr/bin/weston" if n == "weston" else None)
     weston = WestonNestedAdapter()

@@ -419,6 +419,18 @@ def test_atspi_pool_and_zero_cursor_hijack_and_bus_discovery(monkeypatch):
     )
     assert prop_sets == ["IsEnabled"]
 
+    prop_sets.clear()
+    from wayland_computer_use_mcp.core.context import SessionContext
+
+    iso_ctx = SessionContext(
+        mode="blackbox", dbus_address="unix:path=/tmp/fake-dbus", is_isolated=True
+    )
+    assert (
+        asyncio.run(a11y_client.resolve_atspi_bus_address(force_refresh=True, ctx=iso_ctx))
+        == "unix:path=/tmp/fake-atspi"
+    )
+    assert prop_sets == ["IsEnabled", "ScreenReaderEnabled"]
+
 
 def test_gnome_combobox_and_checkbox_action_fallbacks(monkeypatch):
     combo_node = {

@@ -135,7 +135,7 @@ def capture_native_desktop_frame() -> Image.Image | None:
 
     cmd_template: list[str] | None = None
     if shutil.which("spectacle"):
-        cmd_template = ["spectacle", "-b", "-n", "-o"]
+        cmd_template = ["spectacle", "-f", "-b", "-n", "-o"]
     elif shutil.which("grim"):
         cmd_template = ["grim"]
     elif shutil.which("gnome-screenshot"):
@@ -166,7 +166,7 @@ def capture_native_desktop_frame() -> Image.Image | None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=8.0,
+            timeout=5.0,
         )
         if proc.returncode == 0 and os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
             with Image.open(tmp_path) as img:
@@ -178,6 +178,12 @@ def capture_native_desktop_frame() -> Image.Image | None:
                 proc.returncode,
                 (proc.stderr or "").strip()[:300],
             )
+    except subprocess.TimeoutExpired as exc:
+        logger.warning(
+            "Native screenshot capture timed out (%s): %s",
+            cmd_template[0],
+            (exc.stderr or "")[:300] if isinstance(exc.stderr, str) else exc,
+        )
     except Exception as exc:
         logger.debug("Native screenshot capture failed with %s: %s", cmd_template[0], exc)
     finally:

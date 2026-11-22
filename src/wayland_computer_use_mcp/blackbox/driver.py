@@ -59,6 +59,12 @@ class BlackboxDriver:
         self.sandbox.ensure_started(cfg, adapter=adapter)
         ctx = self.context()
         self._adapter = self.sandbox.adapter or adapter
+        try:
+            from wayland_computer_use_mcp.a11y.client import resolve_atspi_bus_address
+
+            await resolve_atspi_bus_address(force_refresh=True, ctx=ctx)
+        except Exception:
+            pass
 
         sink, kind = await self._adapter.connect_input(ctx)
         self._input_sink = sink

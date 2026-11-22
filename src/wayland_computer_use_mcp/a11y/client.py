@@ -111,22 +111,25 @@ def close_atspi_pool() -> None:
     _atspi_loop.stop()
 
 
-async def resolve_atspi_bus_address(force_refresh: bool = False) -> str | None:
+async def resolve_atspi_bus_address(
+    force_refresh: bool = False,
+    ctx: Any = None,
+) -> str | None:
     """Discovers the AT-SPI2 D-Bus socket address from session context, bus, or env."""
     global _cached_bus_address
     from wayland_computer_use_mcp.core.context import get_active_context
 
-    ctx = get_active_context()
-    if ctx and ctx.atspi_bus_address:
-        return ctx.atspi_bus_address
-    if os.environ.get("AT_SPI_BUS_ADDRESS") and not (ctx and ctx.is_isolated):
+    active_ctx = ctx if ctx is not None else get_active_context()
+    if active_ctx and active_ctx.atspi_bus_address:
+        return active_ctx.atspi_bus_address
+    if os.environ.get("AT_SPI_BUS_ADDRESS") and not (active_ctx and active_ctx.is_isolated):
         return os.environ["AT_SPI_BUS_ADDRESS"]
     if _cached_bus_address and not force_refresh:
         return _cached_bus_address
 
     try:
-        if ctx and ctx.dbus_address:
-            session_bus = await MessageBus(bus_address=ctx.dbus_address).connect()
+        if active_ctx and active_ctx.dbus_address:
+            session_bus = await MessageBus(bus_address=active_ctx.dbus_address).connect()
         else:
             session_bus = await MessageBus(bus_type=BusType.SESSION).connect()
         reply = await session_bus.call(
@@ -140,7 +143,8 @@ async def resolve_atspi_bus_address(force_refresh: bool = False) -> str | None:
         try:
             from dbus_fast import Variant
 
-            # Enable toolkit accessibility only (ScreenReaderEnabled launches Orca on GNOME)
+            # Host: only IsEnabled (ScreenReaderEnabled launches Orca).
+            # Isolated sandbox: also set ScreenReaderEnabled so WebKitGTK DOM exposes AX.
             await session_bus.call(
                 Message(
                     destination="org.a11y.Bus",
@@ -151,6 +155,17 @@ async def resolve_atspi_bus_address(force_refresh: bool = False) -> str | None:
                     body=["org.a11y.Status", "IsEnabled", Variant("b", True)],
                 )
             )
+            if active_ctx and active_ctx.is_isolated:
+                await session_bus.call(
+                    Message(
+                        destination="org.a11y.Bus",
+                        path="/org/a11y/bus",
+                        interface="org.freedesktop.DBus.Properties",
+                        member="Set",
+                        signature="ssv",
+                        body=["org.a11y.Status", "ScreenReaderEnabled", Variant("b", True)],
+                    )
+                )
         except Exception:
             pass
 
@@ -163,7 +178,7 @@ async def resolve_atspi_bus_address(force_refresh: bool = False) -> str | None:
 
     uid = os.getuid()
     runtime_dir = (
-        (ctx.xdg_runtime_dir if ctx and ctx.xdg_runtime_dir else None)
+        (active_ctx.xdg_runtime_dir if active_ctx and active_ctx.xdg_runtime_dir else None)
         or os.environ.get("XDG_RUNTIME_DIR")
         or f"/run/user/{uid}"
     )

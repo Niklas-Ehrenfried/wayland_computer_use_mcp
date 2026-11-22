@@ -45,6 +45,8 @@ _LABWC_RC_XML = """<?xml version="1.0"?>
 </labwc_config>
 """
 
+_SWAY_CONF = "default_border none\ndefault_floating_border none\n"
+
 
 @runtime_checkable
 class BlackboxCompositorAdapter(Protocol):
@@ -268,6 +270,16 @@ class WlrootsNestedAdapter:
                 return f"labwc -C {config_dir}"
             return "labwc"
         if binary == "sway":
+            if config_dir:
+                sway_conf = os.path.join(config_dir, "sway.conf")
+                if os.path.isdir(config_dir) and not os.path.exists(sway_conf):
+                    try:
+                        with open(sway_conf, "w", encoding="utf-8") as fh:
+                            fh.write(_SWAY_CONF)
+                    except OSError:
+                        pass
+                if os.path.exists(sway_conf):
+                    return f"sway -c {sway_conf}"
             return "sway -c /dev/null"
         return binary
 
