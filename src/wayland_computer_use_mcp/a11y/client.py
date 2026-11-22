@@ -27,6 +27,67 @@ _dynamic_role_names: dict[int, str] = {}
 _atspi_loop = PersistentLoop(name="AtspiAsyncLoop")
 
 
+def _collect_process_tree_pids(root_pid: int) -> set[int]:
+    """Returns root_pid plus all descendant PIDs discovered in /proc."""
+    tree_pids: set[int] = {root_pid}
+    if root_pid <= 0 or not os.path.isdir("/proc"):
+        return tree_pids
+
+    children_map: dict[int, list[int]] = {}
+    used_task_children = False
+    queue = [root_pid]
+    seen_task: set[int] = {root_pid}
+    while queue:
+        cur = queue.pop(0)
+        task_dir = f"/proc/{cur}/task"
+        try:
+            for tid in os.listdir(task_dir):
+                children_file = os.path.join(task_dir, tid, "children")
+                try:
+                    with open(children_file, encoding="utf-8") as f:
+                        used_task_children = True
+                        for tok in f.read().split():
+                            if tok.isdigit():
+                                cpid = int(tok)
+                                if cpid not in seen_task:
+                                    seen_task.add(cpid)
+                                    tree_pids.add(cpid)
+                                    queue.append(cpid)
+                except OSError:
+                    continue
+        except OSError:
+            continue
+
+    if not used_task_children:
+        try:
+            for entry in os.listdir("/proc"):
+                if not entry.isdigit():
+                    continue
+                stat_path = os.path.join("/proc", entry, "stat")
+                try:
+                    with open(stat_path, encoding="utf-8") as f:
+                        raw = f.read()
+                    rparen = raw.rfind(")")
+                    if rparen == -1:
+                        continue
+                    fields = raw[rparen + 2 :].split()
+                    if len(fields) >= 2 and fields[1].isdigit():
+                        children_map.setdefault(int(fields[1]), []).append(int(entry))
+                except OSError:
+                    continue
+            bfs = [root_pid]
+            while bfs:
+                cur = bfs.pop(0)
+                for cpid in children_map.get(cur, []):
+                    if cpid not in tree_pids:
+                        tree_pids.add(cpid)
+                        bfs.append(cpid)
+        except OSError:
+            pass
+
+    return tree_pids
+
+
 def run_atspi_sync(coro_fn: Any, *args: Any, **kwargs: Any) -> Any:
     """Executes an async AT-SPI helper on the persistent AT-SPI event loop thread."""
     return _atspi_loop.run(coro_fn(*args, **kwargs))
@@ -197,6 +258,7 @@ class AtspiInspector:
 
             apps = reply.body[0]
             matched_app: tuple[str, str] | None = None
+            registry_apps: list[tuple[int, str, str]] = []
 
             for app_ref in apps:
                 bus_name, path = app_ref[0], app_ref[1]
@@ -211,11 +273,21 @@ class AtspiInspector:
                             body=[bus_name],
                         )
                     )
-                    if pid_reply and pid_reply.body and pid_reply.body[0] == pid:
-                        matched_app = (bus_name, path)
-                        break
+                    if pid_reply and pid_reply.body:
+                        app_pid = int(pid_reply.body[0])
+                        if app_pid == pid:
+                            matched_app = (bus_name, path)
+                            break
+                        registry_apps.append((app_pid, bus_name, path))
                 except Exception:
                     pass
+
+            if not matched_app and registry_apps:
+                descendants = _collect_process_tree_pids(pid)
+                for app_pid, bus_name, path in registry_apps:
+                    if app_pid in descendants:
+                        matched_app = (bus_name, path)
+                        break
 
             if not matched_app:
                 logger.debug("No accessible AT-SPI application matched PID %s", pid)

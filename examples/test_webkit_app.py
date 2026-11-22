@@ -3,7 +3,12 @@
 
 from __future__ import annotations
 
+import os
 import sys
+
+if os.environ.get("WLR_RENDERER") == "pixman" or os.environ.get("LIBGL_ALWAYS_SOFTWARE") == "1":
+    os.environ.setdefault("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
+    os.environ.setdefault("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1")
 
 import gi
 

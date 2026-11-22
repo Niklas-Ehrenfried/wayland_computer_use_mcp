@@ -74,6 +74,24 @@ class BatchActionStep(BaseModel):
     timeout_ms: int | None = None
 
 
+_ROLE_ALIAS_GROUPS = (
+    frozenset({"button", "push button"}),
+    frozenset({"entry", "text", "text box"}),
+    frozenset({"check box", "checkbox"}),
+    frozenset({"combo box", "combobox"}),
+)
+
+
+def _role_matches(node_role: str, requested_role: str | None) -> bool:
+    if not requested_role:
+        return True
+    nr = node_role.strip().lower()
+    rr = requested_role.strip().lower()
+    if rr in nr:
+        return True
+    return any(nr in group and rr in group for group in _ROLE_ALIAS_GROUPS)
+
+
 def _match_element(
     candidates: list[tuple[str, dict[str, Any]]],
     target_lower: str,
@@ -81,13 +99,13 @@ def _match_element(
 ) -> str | None:
     # First pass: exact match
     for nid, node in candidates:
-        if role_lower and role_lower not in node.get("role", "").strip().lower():
+        if not _role_matches(node.get("role", ""), role_lower):
             continue
         if node.get("name", "").strip().lower() == target_lower:
             return nid
     # Second pass: substring match
     for nid, node in candidates:
-        if role_lower and role_lower not in node.get("role", "").strip().lower():
+        if not _role_matches(node.get("role", ""), role_lower):
             continue
         if target_lower in node.get("name", "").strip().lower():
             return nid

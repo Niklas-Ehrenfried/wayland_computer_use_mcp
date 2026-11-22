@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import io
+import os
+import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Generator
 from pathlib import Path
@@ -186,3 +189,146 @@ def test_webkit_dom_live(blackbox_session: None) -> None:
         assert tree.get("atspi_available") is True
     finally:
         terminate_app(pid)
+
+
+def test_gtk3_toolkit_live(blackbox_session: None) -> None:
+    """GTK3 widgets expose AT-SPI entries/checkboxes/buttons under Wayland."""
+    py = _find_python_for_modules("gi")
+    if not py:
+        pytest.skip("PyGObject not installed")
+    probe = subprocess.run(
+        [
+            py,
+            "-c",
+            "import gi; gi.require_version('Gtk', '3.0'); from gi.repository import Gtk",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=5,
+        check=False,
+    )
+    if probe.returncode != 0:
+        pytest.skip("GTK3 GI typelib not installed in environment")
+
+    repo_root = Path(__file__).resolve().parent.parent
+    script_path = repo_root / "examples" / "test_gtk3_app.py"
+    res = launch_app(
+        py,
+        args=[str(script_path)],
+        cwd=str(repo_root),
+        ready_timeout_ms=8000,
+    )
+    assert res["status"] == "launched"
+    pid = int(res["pid"])
+    try:
+        wait_res = wait_for_element(target="Apply", role="push button", timeout_ms=5000, pid=pid)
+        assert wait_res["matched"] is True
+
+        interact_with_node(target="Note", action="type", text="hello-gtk3", pid=pid)
+        interact_with_node(target="Enable sync", action="click", pid=pid)
+        interact_with_node(target="Apply", role="push button", action="click", pid=pid)
+
+        logs = get_app_logs(pid=pid, lines=40)
+        assert "[Gtk3Rig] Applied: 1 | hello-gtk3 | sync=True" in logs
+    finally:
+        terminate_app(pid)
+
+
+def test_wrapper_launched_descendant_pid_live(blackbox_session: None) -> None:
+    """Wrapper commands (/bin/sh -c without exec) resolve descendant AT-SPI trees and clean up."""
+    py = _find_python_for_modules("gi")
+    if not py:
+        pytest.skip("PyGObject not installed")
+    probe = subprocess.run(
+        [
+            py,
+            "-c",
+            "import gi; gi.require_version('Gtk', '4.0'); from gi.repository import Gtk",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=5,
+        check=False,
+    )
+    if probe.returncode != 0:
+        pytest.skip("GTK4 GI typelib not installed")
+
+    repo_root = Path(__file__).resolve().parent.parent
+    script_path = repo_root / "examples" / "test_gui_app.py"
+    shell_cmd = f"{shlex.quote(py)} {shlex.quote(str(script_path))} --test-mode; true"
+
+    res = launch_app(
+        "/bin/sh",
+        args=["-c", shell_cmd],
+        cwd=str(repo_root),
+        ready_timeout_ms=8000,
+    )
+    assert res["status"] == "launched"
+    pid = int(res["pid"])
+    descendant_pids: set[int] = set()
+    try:
+        from wayland_computer_use_mcp.a11y.client import _collect_process_tree_pids
+
+        wait_res = wait_for_element(target="Click Me!", timeout_ms=6000, pid=pid)
+        assert wait_res["matched"] is True
+        descendant_pids = _collect_process_tree_pids(pid) - {pid}
+        assert descendant_pids, "Expected child GUI PID under wrapper /bin/sh"
+
+        interact_with_node(target="Click Me!", action="click", pid=pid)
+        clicked = wait_for_element(target="Clicked! (1 clicks)", timeout_ms=4000, pid=pid)
+        assert clicked["matched"] is True
+    finally:
+        terminate_app(pid)
+
+    time.sleep(0.15)
+    for cpid in descendant_pids:
+        assert not Path(f"/proc/{cpid}").exists(), f"Descendant PID {cpid} leaked after terminate"
+
+
+def test_chromium_dom_live(blackbox_session: None) -> None:
+    """Chromium/Chrome renders web DOM controls accessible over AT-SPI2 under Wayland."""
+    browser_bin = next(
+        (
+            shutil.which(name)
+            for name in ("google-chrome", "chromium", "chromium-browser")
+            if shutil.which(name)
+        ),
+        None,
+    )
+    if not browser_bin:
+        pytest.skip("Chromium / Google Chrome not installed in environment")
+
+    html = (
+        "data:text/html,<title>MCP Chrome Test</title>"
+        "<h1>Hello</h1>"
+        '<input aria-label="Search Box" type="text">'
+        "<button onclick=\"document.getElementById('out').textContent="
+        "'Clicked: '+document.querySelector('input').value\">Go Now</button>"
+        '<p id="out">Idle</p>'
+    )
+    with tempfile.TemporaryDirectory(prefix="wayland-mcp-chrome-") as user_data_dir:
+        args = [
+            f"--user-data-dir={user_data_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            f"--app={html}",
+        ]
+        if (
+            os.environ.get("WLR_RENDERER") == "pixman"
+            or os.environ.get("LIBGL_ALWAYS_SOFTWARE") == "1"
+        ):
+            args.insert(0, "--disable-gpu")
+
+        res = launch_app(browser_bin, args=args, ready_timeout_ms=8000)
+        assert res["status"] == "launched"
+        pid = int(res["pid"])
+        try:
+            wait_res = wait_for_element(target="Go Now", timeout_ms=8000, pid=pid)
+            assert wait_res["matched"] is True
+
+            interact_with_node(target="Search Box", action="type", text="wayland-ok", pid=pid)
+            interact_with_node(target="Go Now", action="click", pid=pid)
+            updated = wait_for_element(target="Clicked: wayland-ok", timeout_ms=5000, pid=pid)
+            assert updated["matched"] is True
+        finally:
+            terminate_app(pid)

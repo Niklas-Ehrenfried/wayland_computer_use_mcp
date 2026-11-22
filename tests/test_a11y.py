@@ -510,3 +510,54 @@ def test_gnome_combobox_and_checkbox_action_fallbacks(monkeypatch):
     monkeypatch.setattr(act_mod, "get_cached_node", lambda pid, nid: chk_node)
     assert "via spacebar" in act_mod.invoke_node_action(1234, "k1", action="click")
     assert keys == [["space"]]
+
+
+async def test_get_application_tree_matches_descendant_pid(monkeypatch):
+    """Wrapper launchers match AT-SPI applications registered under a child PID."""
+    from dbus_fast import MessageType
+
+    from wayland_computer_use_mcp.a11y.client import AtspiInspector
+    from wayland_computer_use_mcp.config import get_config
+
+    monkeypatch.setattr(get_config(), "mock_mode", False)
+    inspector = AtspiInspector(bus_address="unix:path=/tmp/fake-atspi")
+    calls = []
+
+    class FakeBus:
+        async def call(self, msg):
+            calls.append((msg.destination, msg.member, msg.body))
+            reply = MagicMock()
+            reply.message_type = MessageType.METHOD_RETURN
+            if msg.member == "GetChildren":
+                reply.body = [[[":1.77", "/org/a11y/atspi/accessible/root"]]]
+            elif msg.member == "GetConnectionUnixProcessID":
+                reply.body = [99002]
+            else:
+                reply.body = []
+            return reply
+
+    inspector.bus = FakeBus()  # type: ignore[assignment]
+    monkeypatch.setattr(inspector, "connect", lambda: _async_return(True))
+    monkeypatch.setattr(inspector, "close", lambda: _async_return(None))
+    monkeypatch.setattr(
+        "wayland_computer_use_mcp.a11y.client._collect_process_tree_pids",
+        lambda pid: {99001, 99002} if pid == 99001 else {pid},
+    )
+    monkeypatch.setattr(
+        inspector,
+        "_fetch_tree_from_cache",
+        lambda bus_name, root_path, max_depth: _async_return(
+            {
+                "role": "application",
+                "name": "WrappedApp",
+                "children": [{"role": "frame", "name": "W", "children": []}],
+            }
+        ),
+    )
+
+    tree = await inspector.get_application_tree(99001)
+    assert tree["name"] == "WrappedApp"
+
+
+async def _async_return(val):
+    return val

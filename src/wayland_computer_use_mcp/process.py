@@ -11,6 +11,7 @@ from __future__ import annotations
 import collections
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -158,6 +159,7 @@ def launch(
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
+        start_new_session=True,
     )
 
     pid = proc.pid
@@ -205,10 +207,23 @@ def terminate(pid: int) -> bool:
             raise PermissionError(f"PID {pid} not owned by this session.")
         proc = _processes[pid]
 
+    pgid: int | None = None
+    if isinstance(subprocess.Popen, type) and isinstance(proc, subprocess.Popen):
+        try:
+            candidate = os.getpgid(proc.pid)
+            own_pgid = os.getpgid(0)
+            if candidate > 1 and candidate != own_pgid:
+                pgid = candidate
+        except OSError:
+            pgid = None
+
     # Send SIGTERM
     try:
-        proc.terminate()
-    except ProcessLookupError:
+        if pgid is not None:
+            os.killpg(pgid, signal.SIGTERM)
+        else:
+            proc.terminate()
+    except (ProcessLookupError, OSError):
         pass
 
     # Wait up to 2.0 seconds
@@ -221,9 +236,17 @@ def terminate(pid: int) -> bool:
     # Escalate to SIGKILL if still running
     if proc.poll() is None:
         try:
-            proc.kill()
+            if pgid is not None:
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                proc.kill()
             proc.wait(timeout=1.0)
-        except (ProcessLookupError, subprocess.TimeoutExpired):
+        except (ProcessLookupError, subprocess.TimeoutExpired, OSError):
+            pass
+    elif pgid is not None:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
             pass
 
     with _lock:

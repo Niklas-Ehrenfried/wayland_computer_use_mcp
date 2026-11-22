@@ -298,3 +298,26 @@ def test_launch_live_order_exited_early_and_idle_virtual_teardown(monkeypatch):
     res2 = terminate_app(pid=222)
     assert res2["virtual_session_closed"] is True and global_portal_session.target_pid is None
     assert len(closed_calls) == 1
+
+
+def test_terminate_kills_wrapper_process_group(monkeypatch):
+    """Terminating a shell wrapper cleans up both the wrapper and its spawned child PID."""
+    from pathlib import Path
+
+    from wayland_computer_use_mcp.a11y.client import _collect_process_tree_pids
+
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    pid = launch("/bin/sh", args=["-c", "sleep 30 & wait"])
+    time.sleep(0.15)
+    tree_pids = _collect_process_tree_pids(pid)
+    child_pids = tree_pids - {pid}
+    assert child_pids, f"Expected spawned sleep child under wrapper {pid}"
+    try:
+        assert is_responsive(pid)
+    finally:
+        terminate(pid)
+
+    time.sleep(0.15)
+    assert not is_responsive(pid)
+    for cpid in child_pids:
+        assert not Path(f"/proc/{cpid}").exists()
