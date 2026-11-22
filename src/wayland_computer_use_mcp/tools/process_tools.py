@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 
-from wayland_computer_use_mcp.config import get_config
+from wayland_computer_use_mcp.config import get_config, resolve_effective_display_mode
 from wayland_computer_use_mcp.portal import global_portal_session
 from wayland_computer_use_mcp.process import (
     get_logs,
+    get_recent_traceback,
     is_responsive,
     launch,
     list_active_processes,
@@ -20,6 +22,8 @@ from wayland_computer_use_mcp.process import (
 from wayland_computer_use_mcp.process import (
     restart as restart_process,
 )
+from wayland_computer_use_mcp.security import global_clamper
+from wayland_computer_use_mcp.tools import emit_ctx_log
 
 logger = logging.getLogger("wayland_computer_use_mcp.tools.process")
 
@@ -29,17 +33,82 @@ def ensure_portal_dialogs_above() -> bool:
     return global_portal_session.active_driver().ensure_dialogs_above()
 
 
-def _lifecycle_metadata(elements: list[dict[str, Any]]) -> dict[str, Any]:
+def _session_summary() -> dict[str, Any]:
+    cfg = get_config()
+    effective_mode, effective_headed, _ = resolve_effective_display_mode(cfg)
+    driver = global_portal_session.active_driver()
+    meta = global_portal_session.metadata()
+    sink = None
+    try:
+        sink = driver.get_input_sink()
+    except Exception:
+        sink = None
+    return {
+        "mode": "mock" if cfg.mock_mode else effective_mode,
+        "configured_mode": cfg.display_mode,
+        "virtual_headed": effective_headed if effective_mode == "virtual" else cfg.virtual_headed,
+        "driver": meta.get("driver", getattr(driver, "name", "unknown")),
+        "adapter": meta.get("adapter"),
+        "backend_kind": meta.get("backend_kind"),
+        "isolated": bool(meta.get("isolated", False)),
+        "is_active": global_portal_session.is_active(),
+        "input_ready": sink is not None or bool(meta.get("eis_connected", False)),
+    }
+
+
+def _lifecycle_metadata(
+    elements: list[dict[str, Any]],
+    hierarchy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     meta = global_portal_session.metadata()
     payload: dict[str, Any] = {
         "eis_connected": bool(meta.get("eis_connected", False)),
+        "session": _session_summary(),
         "interactive_elements": elements,
     }
+    if hierarchy:
+        payload["hierarchy"] = hierarchy
     if meta.get("session_handle") is not None:
         payload["session_handle"] = meta.get("session_handle")
     if meta.get("restore_token") is not None:
         payload["restore_token"] = meta.get("restore_token")
     return payload
+
+
+def _wait_until_window_or_a11y_ready(pid: int, ready_timeout_ms: int) -> dict[str, Any] | None:
+    """Polls until AT-SPI elements or compositor geometry appear (or process exits)."""
+    if ready_timeout_ms <= 0 or get_config().mock_mode or pid <= 0:
+        return None
+
+    from wayland_computer_use_mcp.a11y import get_application_tree
+
+    deadline = time.monotonic() + (ready_timeout_ms / 1000.0)
+    geom_seen_at: float | None = None
+    driver = global_portal_session.active_driver()
+    last_tree: dict[str, Any] | None = None
+
+    while time.monotonic() < deadline:
+        if not is_responsive(pid):
+            break
+        try:
+            tree = get_application_tree(pid)
+            last_tree = tree
+            if tree.get("interactive_elements"):
+                return tree
+        except Exception:
+            pass
+
+        try:
+            if driver.query_window_geometry(pid=pid) is not None:
+                if geom_seen_at is None:
+                    geom_seen_at = time.monotonic()
+                elif time.monotonic() - geom_seen_at >= 0.3:
+                    break
+        except Exception:
+            pass
+        time.sleep(0.1)
+
+    return last_tree
 
 
 def _bind_focus_and_collect_elements(pid: int) -> list[dict[str, Any]]:
@@ -66,29 +135,35 @@ def launch_app(
     args: list[str] | None = None,
     restart: bool = False,
     cwd: str | None = None,
+    ready_timeout_ms: int = 2500,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
-    """Launches a Python GUI script or system app with auto-focus and portal session binding.
+    """Launches a Python GUI script, native binary, or $PATH command with auto-focus.
 
-    If restart=True or if the app is already running, gracefully terminates the old process
-    and launches a fresh instance.
+    Waits briefly (up to ``ready_timeout_ms`` in live/virtual mode) so initial AT-SPI
+    interactive elements and compact hierarchy are immediately usable without extra polling.
     """
     cfg = get_config()
     if not cfg.mock_mode and not cfg.lazy_portal:
         ensure_portal_dialogs_above()
 
+    emit_ctx_log(ctx, f"Launching target: {target}")
     current_pid = global_portal_session.target_pid
     if restart and current_pid and is_responsive(current_pid):
         global_portal_session.ensure_initialized()
         try:
             global_portal_session.active_driver().set_window_state(current_pid, "minimize")
             new_pid = restart_process(current_pid)
+            ready_tree = _wait_until_window_or_a11y_ready(new_pid, ready_timeout_ms)
             initial_elements = _bind_focus_and_collect_elements(new_pid)
+            hierarchy = ready_tree.get("hierarchy") if ready_tree else None
+            emit_ctx_log(ctx, f"Restarted PID {new_pid} ({len(initial_elements)} elements)")
             return {
                 "status": "restarted",
                 "old_pid": current_pid,
                 "pid": new_pid,
                 "target": target,
-                **_lifecycle_metadata(initial_elements),
+                **_lifecycle_metadata(initial_elements, hierarchy=hierarchy),
             }
         except Exception as exc:
             logger.warning("Hot restart failed, falling back to clean launch: %s", exc)
@@ -96,18 +171,15 @@ def launch_app(
     # In live window-selection mode before a portal session exists, launch the target app first so
     # its window is visible in the OS portal picker; in virtual/mock mode, init first so
     # WAYLAND_DISPLAY points to the isolated compositor before spawning the app.
+    effective_mode, _, effective_lazy = resolve_effective_display_mode(cfg)
     defer_portal_init = (
-        not global_portal_session.is_active()
-        and cfg.display_mode != "virtual"
-        and not cfg.mock_mode
+        not global_portal_session.is_active() and effective_mode != "virtual" and not cfg.mock_mode
     )
     if not defer_portal_init:
         global_portal_session.ensure_initialized()
 
     pid = launch(target, args or [], cwd)
     if defer_portal_init:
-        import time
-
         time.sleep(0.5)
         try:
             global_portal_session.ensure_initialized()
@@ -118,7 +190,29 @@ def launch_app(
                 pass
             raise
 
+    ready_tree = _wait_until_window_or_a11y_ready(pid, ready_timeout_ms)
+    if not cfg.mock_mode and not global_portal_session.is_mock and not is_responsive(pid):
+        logs = get_logs(pid, lines=40)
+        tb = get_recent_traceback(pid)
+        return {
+            "status": "exited_early",
+            "exited_early": True,
+            "pid": pid,
+            "target": target,
+            "args": args or [],
+            "cwd": cwd,
+            "logs": logs,
+            "traceback": tb,
+            "recovery_hint": (
+                "Process exited before a window or AT-SPI tree appeared. "
+                "Inspect 'logs'/'traceback', fix the underlying error, and call launch_app() again."
+            ),
+            **_lifecycle_metadata([]),
+        }
+
     initial_elements = _bind_focus_and_collect_elements(pid)
+    hierarchy = ready_tree.get("hierarchy") if ready_tree else None
+    emit_ctx_log(ctx, f"Launched PID {pid} ({len(initial_elements)} elements)")
 
     return {
         "status": "launched",
@@ -126,7 +220,7 @@ def launch_app(
         "target": target,
         "args": args or [],
         "cwd": cwd,
-        **_lifecycle_metadata(initial_elements),
+        **_lifecycle_metadata(initial_elements, hierarchy=hierarchy),
     }
 
 
@@ -155,7 +249,8 @@ def restart_app(pid: int | None = None) -> dict[str, Any]:
 
     global_portal_session.active_driver().set_window_state(effective_pid, "minimize")
     cfg = get_config()
-    if not cfg.mock_mode and not cfg.lazy_portal:
+    _, _, effective_lazy = resolve_effective_display_mode(cfg)
+    if not cfg.mock_mode and not effective_lazy:
         ensure_portal_dialogs_above()
     global_portal_session.ensure_initialized()
 
@@ -178,6 +273,7 @@ def terminate_app(pid: int | None = None) -> dict[str, Any]:
         raise RuntimeError("No target PID to terminate.")
 
     terminate(effective_pid)
+    global_portal_session.clear_pid_state(effective_pid)
     if global_portal_session.target_pid == effective_pid:
         global_portal_session.target_pid = None
 
@@ -213,6 +309,26 @@ def get_app_logs(pid: int | None = None, lines: int = 50) -> str:
     return get_logs(effective_pid, lines=lines)
 
 
+def get_session_status() -> dict[str, Any]:
+    """Reports active display mode, compositor adapter, input readiness, and target window."""
+    summary = _session_summary()
+    w, h = global_clamper.dimensions
+    summary.update(
+        {
+            "target_pid": global_portal_session.target_pid,
+            "target_title": global_portal_session.target_title,
+            "window_bounds": [
+                global_portal_session.window_offset_x,
+                global_portal_session.window_offset_y,
+                w,
+                h,
+            ],
+            "managed_apps_count": len(list_active_processes()),
+        }
+    )
+    return summary
+
+
 def register_process_tools(mcp: FastMCP) -> None:
     """Registers application process lifecycle tools onto the FastMCP server."""
     mutate_ann = ToolAnnotations(
@@ -229,3 +345,4 @@ def register_process_tools(mcp: FastMCP) -> None:
     mcp.tool(annotations=destructive_ann)(terminate_app)
     mcp.tool(annotations=readonly_ann)(get_app_logs)
     mcp.tool(annotations=readonly_ann)(list_managed_apps)
+    mcp.tool(annotations=readonly_ann)(get_session_status)

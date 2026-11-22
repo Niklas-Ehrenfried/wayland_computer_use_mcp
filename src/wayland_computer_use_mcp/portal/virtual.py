@@ -14,7 +14,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from wayland_computer_use_mcp.config import DEFAULT_VIRTUAL_CMD, Config
+from wayland_computer_use_mcp.config import (
+    DEFAULT_VIRTUAL_CMD,
+    Config,
+    resolve_effective_display_mode,
+)
 from wayland_computer_use_mcp.core.context import SessionContext, set_active_context
 
 logger = logging.getLogger(__name__)
@@ -216,7 +220,10 @@ class VirtualSessionManager:
 
     def to_context(self, cfg: Config | None = None) -> SessionContext:
         """Builds an explicit SessionContext snapshot for the active virtual sandbox."""
-        headed = cfg.virtual_headed if cfg is not None else False
+        if cfg is not None:
+            _, headed, _ = resolve_effective_display_mode(cfg)
+        else:
+            headed = False
         return SessionContext(
             mode="blackbox",
             xdg_runtime_dir=self.runtime_dir,
@@ -256,8 +263,9 @@ class VirtualSessionManager:
         comp_env["XDG_RUNTIME_DIR"] = private_xdg
         comp_env.pop("AT_SPI_BUS_ADDRESS", None)
 
+        _, effective_headed, _ = resolve_effective_display_mode(cfg)
         host_link_name: str | None = None
-        if cfg.virtual_headed and host_wl:
+        if effective_headed and host_wl:
             host_sock = host_wl if os.path.isabs(host_wl) else os.path.join(host_xdg, host_wl)
             host_link_name = f"host-{os.path.basename(host_wl)}"
             if os.path.exists(host_sock):
@@ -274,7 +282,7 @@ class VirtualSessionManager:
 
         if dbus_addr:
             comp_env["DBUS_SESSION_BUS_ADDRESS"] = dbus_addr
-        if cfg.virtual_headed and host_link_name:
+        if effective_headed and host_link_name:
             comp_env["WAYLAND_DISPLAY"] = host_link_name
         else:
             comp_env.pop("WAYLAND_DISPLAY", None)
@@ -299,9 +307,9 @@ class VirtualSessionManager:
             empty_cfg_dir = os.path.join(private_xdg, "compositor-cfg")
             os.makedirs(empty_cfg_dir, exist_ok=True)
             cmd = adapter.build_command(
-                headed=cfg.virtual_headed,
+                headed=effective_headed,
                 socket_name=socket_name,
-                host_wayland_display=host_link_name if cfg.virtual_headed else None,
+                host_wayland_display=host_link_name if effective_headed else None,
                 config_dir=empty_cfg_dir,
             )
             if not cmd:
@@ -315,7 +323,7 @@ class VirtualSessionManager:
             cmd = explicit
 
         self.compositor_cmd = cmd
-        logger.info("Starting isolated virtual compositor (headed=%s): %s", cfg.virtual_headed, cmd)
+        logger.info("Starting isolated virtual compositor (headed=%s): %s", effective_headed, cmd)
         try:
             self.compositor_proc = subprocess.Popen(
                 shlex.split(cmd),

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
@@ -20,9 +21,9 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 
 @dataclass
 class Config:
-    # "live" uses active $WAYLAND_DISPLAY / session bus;
-    # "virtual" targets/launches a virtual/headless compositor.
-    display_mode: Literal["live", "virtual"] = "live"
+    # "auto" picks isolated Blackbox ("virtual") when a nested compositor is available,
+    # falling back to "live" with lazy portals; "live" or "virtual" force that mode.
+    display_mode: Literal["auto", "live", "virtual"] = "auto"
 
     # XDG ScreenCast portal source type bitmask:
     # 1 = Monitor, 2 = Window (default), 3 = Window | Monitor
@@ -61,7 +62,11 @@ class Config:
             try:
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    if "display_mode" in data and data["display_mode"] in ("live", "virtual"):
+                    if "display_mode" in data and data["display_mode"] in (
+                        "auto",
+                        "live",
+                        "virtual",
+                    ):
                         config.display_mode = data["display_mode"]
                     if "source_type" in data and isinstance(data["source_type"], int):
                         config.source_type = data["source_type"]
@@ -75,12 +80,20 @@ class Config:
                         config.mock_mode = bool(data["mock_mode"])
                     if "enable_desktop_installer" in data:
                         config.enable_desktop_installer = bool(data["enable_desktop_installer"])
+                    if "virtual_headed" in data:
+                        config.virtual_headed = bool(data["virtual_headed"])
+                    if "action_delay_seconds" in data and isinstance(
+                        data["action_delay_seconds"], (int, float)
+                    ):
+                        config.action_delay_seconds = float(data["action_delay_seconds"])
+                    if "lazy_portal" in data:
+                        config.lazy_portal = bool(data["lazy_portal"])
             except Exception:
                 pass
 
         # Environment variable overrides
         env_mode = os.environ.get("WAYLAND_MCP_DISPLAY_MODE", "").strip().lower()
-        if env_mode in ("live", "virtual"):
+        if env_mode in ("auto", "live", "virtual"):
             config.display_mode = env_mode  # type: ignore
         elif env_mode in ("virtual-window", "virtual_window", "isolated", "headed"):
             config.display_mode = "virtual"
@@ -162,11 +175,13 @@ class Config:
                 sys.exit(0)
             elif arg.startswith("--display-mode="):
                 mode = arg.split("=", 1)[1].strip().lower()
-                if mode in ("live", "virtual"):
+                if mode in ("auto", "live", "virtual"):
                     self.display_mode = mode  # type: ignore
                 elif mode in ("virtual-window", "virtual_window", "isolated", "headed"):
                     self.display_mode = "virtual"
                     self.virtual_headed = True
+            elif arg == "--auto":
+                self.display_mode = "auto"
             elif arg == "--virtual":
                 self.display_mode = "virtual"
             elif arg in ("--virtual-window", "--isolated-window"):
@@ -215,15 +230,17 @@ Usage:
   wayland-computer-use-mcp [OPTIONS]
 
 Options:
-  --live                      Run in active Wayland user desktop session (default).
+  --auto                      Use isolated virtual window if compositor available (default).
+  --live                      Run in active Wayland user desktop session.
   --virtual                   Run in a headless virtual Wayland compositor session.
   --virtual-window            Open a visible Playwright-style isolated compositor window.
-  --display-mode=MODE         Set display mode ('live' or 'virtual').
+  --display-mode=MODE         Set display mode ('auto', 'live', or 'virtual').
   --window-only               Clamp capture and input to active application window (default).
   --fullscreen, --monitor     Allow full desktop/screen capture and interaction.
   --allow-all                 Allow either window or display capture.
   --access=ACCESS             Set access mode ('window', 'fullscreen', or 'both').
   --enable-desktop-installer  Expose install_to_desktop / uninstall_from_desktop tools.
+  --lazy-portal               Defer host portal prompts until visual or physical use.
   --mock                      Run in headless mock mode for testing/CI.
   -h, --help                  Show this help message and exit.
   -v, --version               Show version and exit.
@@ -231,7 +248,10 @@ Options:
 Environment Variables:
   WAYLAND_MCP_DISPLAY_MODE             'live' or 'virtual'
   WAYLAND_MCP_VIRTUAL_HEADED           Set '1' for visible nested compositor window
+  WAYLAND_MCP_VIRTUAL_CMD              Override nested compositor binary/command
   WAYLAND_MCP_ACCESS_MODE              'window', 'fullscreen', or 'both'
+  WAYLAND_MCP_LAZY_PORTAL              Set '1' to defer live host portal prompts
+  WAYLAND_MCP_ACTION_DELAY             Extra pause in seconds after physical inputs
   WAYLAND_MCP_PROJECT_DIR              Override project root for .agents/artifacts/
   WAYLAND_MCP_SAVE_FRAMES_DIR          Directory to persist screenshots
   WAYLAND_MCP_ENABLE_DESKTOP_INSTALLER Set '1' to enable desktop shortcut tools
@@ -253,3 +273,26 @@ def set_config(config: Config) -> None:
     """Set global active configuration."""
     global _active_config
     _active_config = config
+
+
+def resolve_effective_display_mode(
+    cfg: Config | None = None,
+) -> tuple[Literal["live", "virtual"], bool, bool]:
+    """Resolves (effective_mode, effective_headed, effective_lazy_portal) from config.
+
+    When ``display_mode == "auto"``, prefers isolated Blackbox ("virtual") whenever
+    ``dbus-daemon`` and a nested compositor (``kwin_wayland``, ``labwc``, or ``sway``)
+    are installed; otherwise falls back to ``("live", True, True)``.
+    """
+    active = cfg or get_config()
+    if active.display_mode == "virtual":
+        return "virtual", bool(active.virtual_headed), bool(active.lazy_portal)
+    if active.display_mode == "live":
+        return "live", True, bool(active.lazy_portal)
+
+    has_dbus = bool(shutil.which("dbus-daemon"))
+    has_comp = any(shutil.which(cmd) for cmd in ("kwin_wayland", "labwc", "sway"))
+    if has_dbus and has_comp:
+        headed = bool(active.virtual_headed or os.environ.get("WAYLAND_DISPLAY"))
+        return "virtual", headed, False
+    return "live", True, True

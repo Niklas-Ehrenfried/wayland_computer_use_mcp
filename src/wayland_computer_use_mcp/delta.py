@@ -240,8 +240,9 @@ def wrap_with_delta(
         )
 
     before = snapshot_interactive_state(pid)
-    action_start = time.time()
+    action_start = time.monotonic()
     raw = action_fn()
+    initial_ms = min(settle_ms, 60) if settle_ms > 0 else 0
     if settle_ms > 0:
         try:
             from wayland_computer_use_mcp.a11y import global_event_listener
@@ -253,20 +254,45 @@ def wrap_with_delta(
                     pid=pid,
                 )
             else:
-                time.sleep(settle_ms / 1000.0)
+                time.sleep(initial_ms / 1000.0)
         except Exception:
-            time.sleep(settle_ms / 1000.0)
+            time.sleep(initial_ms / 1000.0)
     after = snapshot_interactive_state(pid)
 
     delta = compute_ui_delta(before, after)
-    # Retry once within remaining settle budget if toolkit flushed AT-SPI updates late
-    if settle_ms >= 80 and not delta["modified"] and not delta["appeared"] and not delta["hidden"]:
-        elapsed_ms = (time.time() - action_start) * 1000.0
-        remaining_ms = settle_ms - elapsed_ms
-        if remaining_ms > 15:
-            time.sleep(min(remaining_ms, 60.0) / 1000.0)
+    # Only poll up to remaining settle_ms budget when UI delta is initially empty
+    # (catches slow async popovers and late stderr tracebacks without slowing normal clicks)
+    if (
+        settle_ms > initial_ms
+        and not delta["modified"]
+        and not delta["appeared"]
+        and not delta["hidden"]
+    ):
+        from wayland_computer_use_mcp.process import (
+            get_recent_traceback,
+            has_unreported_traceback,
+        )
+
+        deadline = action_start + (settle_ms / 1000.0)
+        while time.monotonic() < deadline:
+            if has_unreported_traceback(pid):
+                tb_now = get_recent_traceback(pid) or ""
+                if len(tb_now.splitlines()) < 3:
+                    time.sleep(0.03)
+                break
+            step_sleep = min(0.05, max(0.0, deadline - time.monotonic()))
+            if step_sleep <= 0:
+                break
+            time.sleep(step_sleep)
+            if has_unreported_traceback(pid):
+                tb_now = get_recent_traceback(pid) or ""
+                if len(tb_now.splitlines()) < 3:
+                    time.sleep(0.03)
+                break
             after = snapshot_interactive_state(pid)
             delta = compute_ui_delta(before, after)
+            if delta["modified"] or delta["appeared"] or delta["hidden"]:
+                break
 
     raw_str = raw if isinstance(raw, str) else raw.get("result", str(raw))
 

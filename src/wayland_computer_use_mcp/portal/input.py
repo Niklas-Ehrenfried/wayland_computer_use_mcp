@@ -183,12 +183,10 @@ class InputDispatcher:
 
     def dispatch_clipboard_read(self) -> str:
         """Reads current text from the system clipboard via active backends."""
-        self._verify_preconditions()
         return read_system_clipboard()
 
     def dispatch_clipboard_write(self, text: str) -> str:
         """Writes text into the system clipboard via active backends."""
-        self._verify_preconditions()
         if write_system_clipboard(text):
             return f"Copied {len(text)} characters to clipboard."
         return "Failed to write to clipboard: no supported clipboard backend available"

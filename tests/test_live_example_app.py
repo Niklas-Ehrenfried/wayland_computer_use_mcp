@@ -29,9 +29,14 @@ from wayland_computer_use_mcp.server import (
     hover,
     inspect_ui_tree,
     interact_with_node,
+    keyboard,
     launch_app,
+    mouse,
+    preset_workflow,
     scroll,
     terminate_app,
+    wait_for_element,
+    watch_ui_events,
 )
 
 pytestmark = pytest.mark.live
@@ -400,10 +405,17 @@ def test_08_scroll_and_select_data_list(live_app: int):
 
 
 def test_09_drag_and_drop_gesture(live_app: int):
-    """Component 8: Drag & Drop Gesture - Smooth linear interpolation within window bounds."""
-    # Test valid clamped drag within window bounds
+    """Component 8: Drag & Drop + consolidated mouse/keyboard tools within window bounds."""
+    pid = live_app
     drag_res = drag(100, 200, 250, 200)
     assert "Dragged" in drag_res
+
+    mouse_drag = mouse(action="drag", x=100, y=200, end_x=220, end_y=200, pid=pid)
+    assert "Dragged" in mouse_drag
+    mouse_hover = mouse(action="hover", x=120, y=200, duration_ms=15, pid=pid)
+    assert "Hovered" in mouse_hover
+    kb_res = keyboard(action="keys", keys=["shift"], pid=pid)
+    assert "Dispatched key combination" in kb_res
 
 
 def test_10_crash_to_context_interception(live_app: int):
@@ -486,11 +498,16 @@ def test_12_capture_window_frame_live(live_app: int):
 
 
 def test_13_app_logs_and_event_stream(live_app: int):
-    """Tests retrieving console logs and verifying event stream capture."""
+    """Tests retrieving console logs and verifying AT-SPI event stream capture."""
     pid = live_app
     logs = get_app_logs(pid=pid, lines=50)
     assert isinstance(logs, str)
-    assert len(logs) > 0
+    assert "[TestRig]" in logs
+
+    events = watch_ui_events(timeout_ms=250, pid=pid)
+    assert events["settled"] is True
+    assert isinstance(events["mutations"], list)
+    assert events["elapsed_ms"] >= 0
 
 
 def test_14_live_text_manipulation_suite(live_app: int):
@@ -617,3 +634,92 @@ def test_15_set_value_and_semantic_parent_bubbling(live_app: int):
     if label_elem:
         bubble_res = interact_with_node(node_id=label_elem["id"], action="click", pid=pid)
         assert "via parent" in bubble_res or "Activated" in bubble_res
+
+
+def _ensure_controls_tab(pid: int) -> dict:
+    tree = inspect_ui_tree(pid=pid)
+    controls_tab = next(
+        (
+            e
+            for e in tree["interactive_elements"]
+            if "Controls" in e.get("name", "") or e.get("id") == "t1"
+        ),
+        None,
+    )
+    if controls_tab:
+        interact_with_node(node_id=controls_tab["id"], action="click", pid=pid)
+        time.sleep(0.1)
+    return inspect_ui_tree(pid=pid)
+
+
+def test_16_switch_spinbutton_and_disabled_widget(live_app: int):
+    """Components 10–12: Gtk.Switch toggle, Gtk.SpinButton set_value, and disabled state."""
+    pid = live_app
+    tree = _ensure_controls_tab(pid)
+    elements = tree["interactive_elements"]
+
+    disabled_btn = next(
+        (e for e in elements if "Disabled Action" in e.get("name", "")),
+        None,
+    )
+    assert disabled_btn is not None, "Disabled Action button not found"
+    assert disabled_btn["enabled"] is False
+    assert "enabled" not in disabled_btn.get("states", [])
+
+    interact_with_node(target="Auto-Save Mode", action="click", pid=pid)
+    spin_res = interact_with_node(target="Retry Count", action="set_value", value=42.0, pid=pid)
+    assert "42" in spin_res or "value" in spin_res.lower()
+    time.sleep(0.15)
+
+    after_tree = inspect_ui_tree(pid=pid)
+    names = [e.get("name", "") for e in after_tree["interactive_elements"]]
+    assert any("Auto-Save: On" in n for n in names), f"Switch did not toggle on: {names}"
+    assert any("Spin Value: 42" in n for n in names), f"SpinButton did not update: {names}"
+
+
+def test_17_modal_dialog_and_wait_for_element(live_app: int):
+    """Component 13: Opening a transient modal window, wait_for_element present/gone, and result."""
+    pid = live_app
+    _ensure_controls_tab(pid)
+
+    interact_with_node(target="Open Modal Dialog", action="click", pid=pid)
+    present_res = wait_for_element(
+        target="Confirm Dialog", state="present", timeout_ms=4000, pid=pid
+    )
+    assert present_res["matched"] is True
+
+    interact_with_node(target="Confirm Dialog", action="click", pid=pid)
+    gone_res = wait_for_element(target="Confirm Dialog", state="gone", timeout_ms=4000, pid=pid)
+    assert gone_res["matched"] is True
+
+    after_tree = inspect_ui_tree(pid=pid)
+    assert any(
+        "Dialog Result: Confirmed" in e.get("name", "") for e in after_tree["interactive_elements"]
+    )
+
+
+def test_18_preset_workflow_and_annotated_target_capture(live_app: int):
+    """Component 14: Live preset save/run/delete normalization + target-cropped SoM capture."""
+    pid = live_app
+    _ensure_controls_tab(pid)
+
+    saved = preset_workflow(
+        action="save",
+        name="live_click_test",
+        description="Live verification macro",
+        steps=[{"action": "click", "target": "b1"}],
+        pid=pid,
+    )
+    try:
+        assert saved["status"] == "saved"
+        assert saved.get("normalized_steps") == 1
+        ran = preset_workflow(action="run", name="live_click_test", pid=pid)
+        assert ran["status"] == "success"
+        cap = capture_window_frame(target="b1", annotate_elements=True, pid=pid)
+        assert len(cap) >= 2
+        assert len(cap.raw_bytes) > 0
+    finally:
+        try:
+            preset_workflow(action="delete", name="live_click_test")
+        except Exception:
+            pass

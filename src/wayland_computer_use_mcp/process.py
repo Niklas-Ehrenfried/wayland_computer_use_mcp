@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import collections
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -22,6 +23,8 @@ _lock = threading.RLock()
 _processes: dict[int, subprocess.Popen[str]] = {}
 _logs: dict[int, collections.deque[str]] = {}
 _proc_metadata: dict[int, dict[str, Any]] = {}
+_log_line_counts: dict[int, int] = {}
+_last_warned_tb: dict[int, tuple[int, str]] = {}
 
 
 def find_virtualenv_python(target_path: Path | str) -> Path:
@@ -49,13 +52,19 @@ def find_virtualenv_python(target_path: Path | str) -> Path:
     return Path(sys.executable)
 
 
-def _consume_stream(stream: Any, log_deque: collections.deque[str]) -> None:
-    """Daemon thread worker consuming lines from process stderr."""
+def _consume_stream(stream: Any, log_deque: collections.deque[str], pid: int | None = None) -> None:
+    """Daemon thread worker consuming lines from process stdout/stderr."""
     try:
         for line in iter(stream.readline, ""):
             if not line:
                 break
-            log_deque.append(line.rstrip("\r\n"))
+            cleaned = line.rstrip("\r\n")
+            if pid is not None:
+                with _lock:
+                    log_deque.append(cleaned)
+                    _log_line_counts[pid] = _log_line_counts.get(pid, 0) + 1
+            else:
+                log_deque.append(cleaned)
     except Exception:
         pass
     finally:
@@ -65,41 +74,60 @@ def _consume_stream(stream: Any, log_deque: collections.deque[str]) -> None:
             pass
 
 
+_ELECTRON_CHROMIUM_TOKENS = ("electron", "chromium", "chrome", "code")
+
+
+def _is_chromium_like(cmd_head: str) -> bool:
+    name = os.path.basename(cmd_head).lower()
+    return any(tok in name for tok in _ELECTRON_CHROMIUM_TOKENS)
+
+
 def launch(
     target_script: str,
     args: list[str] | None = None,
     cwd: str | None = None,
     env: dict[str, str] | None = None,
 ) -> int:
-    """Launches a script/application using auto-detected Python runtime.
+    """Launches a GUI script, native binary, or $PATH command with accessibility env setup.
 
-    Spawns process with stdout=PIPE, stderr=PIPE, runs a background reader thread
-    for stderr into a ring buffer (max 200 lines), and registers PID in _processes.
+    Spawns process with stdout=PIPE, stderr=PIPE, runs daemon reader threads into a
+    200-line ring buffer, and registers PID in _processes.
     """
-    args = args or []
+    args = list(args or [])
     target_path = Path(target_script)
+    resolved_local: Path | None = None
     if target_path.is_absolute() and target_path.exists():
-        script_path = target_path
+        resolved_local = target_path
     elif cwd and (Path(cwd) / target_path).exists():
-        script_path = (Path(cwd) / target_path).resolve()
+        resolved_local = (Path(cwd) / target_path).resolve()
     elif target_path.exists():
-        script_path = target_path.resolve()
+        resolved_local = target_path.resolve()
     else:
-        # Fallback to repo/project root
         repo_root = Path(__file__).resolve().parents[2]
         candidate = (repo_root / target_path).resolve()
         if candidate.exists():
-            script_path = candidate
+            resolved_local = candidate
+
+    which_bin = None if resolved_local is not None else shutil.which(target_script)
+
+    if resolved_local is not None:
+        if resolved_local.suffix == ".py" or not os.access(resolved_local, os.X_OK):
+            python_bin = find_virtualenv_python(resolved_local)
+            cmd = [str(python_bin), str(resolved_local), *args]
         else:
-            script_path = target_path.resolve()
-
-    if script_path.suffix == ".py" or not os.access(script_path, os.X_OK):
-        python_bin = find_virtualenv_python(script_path)
-        cmd = [str(python_bin), str(script_path), *args]
+            cmd = [str(resolved_local), *args]
+        work_dir = cwd or str(resolved_local.parent)
+    elif which_bin:
+        cmd = [which_bin, *args]
+        work_dir = cwd or os.getcwd()
     else:
-        cmd = [str(script_path), *args]
-
-    work_dir = cwd or str(script_path.parent)
+        script_path = target_path.resolve()
+        if script_path.suffix == ".py" or not os.access(script_path, os.X_OK):
+            python_bin = find_virtualenv_python(script_path)
+            cmd = [str(python_bin), str(script_path), *args]
+        else:
+            cmd = [str(script_path), *args]
+        work_dir = cwd or str(script_path.parent)
 
     if env is not None:
         proc_env = dict(env)
@@ -111,6 +139,16 @@ def launch(
     proc_env["PYTHONUNBUFFERED"] = "1"
     proc_env["GTK_MODULES"] = "gail:atk-bridge"
     proc_env["QT_LINUX_ACCESSIBILITY_ALWAYS_ON"] = "1"
+    proc_env.setdefault("ACCESSIBILITY_ENABLED", "1")
+    proc_env.setdefault("ELECTRON_OZONE_PLATFORM_HINT", "auto")
+
+    if _is_chromium_like(cmd[0]) or _is_chromium_like(target_script):
+        if "--force-renderer-accessibility" not in cmd:
+            cmd.append("--force-renderer-accessibility")
+        if proc_env.get("WAYLAND_DISPLAY") and not any(
+            a.startswith("--ozone-platform") for a in cmd
+        ):
+            cmd.append("--ozone-platform=wayland")
 
     proc = subprocess.Popen(
         cmd,
@@ -128,8 +166,11 @@ def launch(
     with _lock:
         _processes[pid] = proc
         _logs[pid] = log_deque
+        _log_line_counts[pid] = 0
+        _last_warned_tb.pop(pid, None)
         _proc_metadata[pid] = {
             "target_script": target_script,
+            "target": target_script,
             "args": list(args),
             "cwd": cwd,
             "cmd": cmd,
@@ -141,7 +182,7 @@ def launch(
         if stream is not None:
             thread = threading.Thread(
                 target=_consume_stream,
-                args=(stream, log_deque),
+                args=(stream, log_deque, pid),
                 daemon=True,
                 name=f"{stream_name}-reader-{pid}",
             )
@@ -187,6 +228,7 @@ def terminate(pid: int) -> bool:
 
     with _lock:
         _processes.pop(pid, None)
+        _last_warned_tb.pop(pid, None)
         # Note: retain logs temporarily so client can inspect crash info if needed
 
     return True
@@ -252,30 +294,57 @@ def is_responsive(pid: int) -> bool:
     return True
 
 
-def get_recent_traceback(pid: int) -> str | None:
-    """Scans the ring buffer for standard Python traceback patterns."""
+def _get_traceback_with_sig(pid: int) -> tuple[str | None, tuple[int, str] | None]:
+    """Returns (traceback_text, (abs_start_line, exception_header)) for deduplication."""
     with _lock:
         if pid not in _logs:
-            return None
+            return None, None
         entries = list(_logs[pid])
+        total_lines = max(_log_line_counts.get(pid, 0), len(entries))
 
-    full_text = "\n".join(entries)
-    if "Traceback (most recent call last):" in full_text:
-        idx = full_text.rfind("Traceback (most recent call last):")
-        return full_text[idx:].strip()
-    return None
+    tb_idx = -1
+    for i in range(len(entries) - 1, -1, -1):
+        if "Traceback (most recent call last):" in entries[i]:
+            tb_idx = i
+            break
+    if tb_idx < 0:
+        return None, None
+
+    tb_lines = entries[tb_idx:]
+    tb_text = "\n".join(tb_lines).strip()
+    abs_start = total_lines - len(entries) + tb_idx
+    exc_line = ""
+    for line in tb_lines[1:]:
+        if line and not line.startswith((" ", "\t")):
+            exc_line = line
+            break
+    return tb_text, (abs_start, exc_line)
+
+
+def get_recent_traceback(pid: int) -> str | None:
+    """Scans the ring buffer for standard Python traceback patterns."""
+    tb, _ = _get_traceback_with_sig(pid)
+    return tb
+
+
+def has_unreported_traceback(pid: int) -> bool:
+    """Returns True if PID has a stderr traceback not yet surfaced by check_process_health."""
+    tb, sig = _get_traceback_with_sig(pid)
+    if not tb or sig is None:
+        return False
+    with _lock:
+        return _last_warned_tb.get(pid) != sig
 
 
 def check_process_health_and_enrich(pid: int | None, result_text: Any) -> Any:
     """Checks process health after an action and attaches traceback if detected.
 
     - If the process terminated/crashed, raises RuntimeError with the formatted traceback.
-    - If the process is alive but emitted a traceback to stderr, appends an alert or warning field.
+    - If the process is alive and emitted a new traceback to stderr, attaches a warning once.
     """
     if not pid:
         return result_text
 
-    # Only check if PID is managed
     with _lock:
         is_managed = pid in _processes
 
@@ -283,33 +352,45 @@ def check_process_health_and_enrich(pid: int | None, result_text: Any) -> Any:
         return result_text
 
     alive = is_responsive(pid)
-    tb = get_recent_traceback(pid)
-    if not tb:
-        for _ in range(5):
-            time.sleep(0.04)
-            tb = get_recent_traceback(pid)
-            if tb:
-                break
-
     if not alive:
+        tb = get_recent_traceback(pid)
+        if not tb:
+            for _ in range(5):
+                time.sleep(0.04)
+                tb = get_recent_traceback(pid)
+                if tb:
+                    break
         if tb:
             raise RuntimeError(f"Application process (PID {pid}) crashed!\n\nTraceback:\n{tb}")
         raise RuntimeError(f"Application process (PID {pid}) unexpectedly terminated or exited.")
 
-    if tb:
-        warning_msg = (
-            "> [!WARNING]\n"
-            "> Application emitted a Python exception to stderr:\n"
-            "```python\n"
-            f"{tb}\n"
-            "```"
-        )
-        if isinstance(result_text, dict):
-            result_text["warning"] = warning_msg
-            return result_text
-        return f"{result_text}\n\n{warning_msg}"
+    tb, sig = _get_traceback_with_sig(pid)
+    if not tb or sig is None:
+        return result_text
 
-    return result_text
+    # Avoid repeating an already-surfaced traceback on subsequent healthy actions
+    with _lock:
+        prev_sig = _last_warned_tb.get(pid)
+    if prev_sig == sig:
+        return result_text
+
+    # If the traceback header just arrived mid-flush, allow one short read settle
+    if len(tb.splitlines()) < 3:
+        time.sleep(0.04)
+        tb, sig = _get_traceback_with_sig(pid)
+        if not tb or sig is None:
+            return result_text
+
+    with _lock:
+        _last_warned_tb[pid] = sig
+
+    warning_msg = (
+        f"> [!WARNING]\n> Application emitted a Python exception to stderr:\n```python\n{tb}\n```"
+    )
+    if isinstance(result_text, dict):
+        result_text["warning"] = warning_msg
+        return result_text
+    return f"{result_text}\n\n{warning_msg}"
 
 
 def prune_dead_processes() -> list[int]:

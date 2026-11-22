@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -15,15 +15,16 @@ from wayland_computer_use_mcp.presets import (
     list_presets,
     save_preset,
 )
+from wayland_computer_use_mcp.tools.navigation_tools import BatchActionStep
 
 logger = logging.getLogger("wayland_computer_use_mcp.tools.preset")
 
 
 def preset_workflow(
-    action: str = "run",
+    action: Literal["list", "run", "view", "save", "delete"] = "run",
     name: str | None = None,
     description: str | None = None,
-    steps: list[dict[str, Any]] | None = None,
+    steps: list[BatchActionStep] | None = None,
     target_app: str | None = None,
     pid: int | None = None,
 ) -> dict[str, Any]:
@@ -67,7 +68,16 @@ def preset_workflow(
     if act == "save":
         if not steps:
             raise ValueError("Saving a preset requires a non-empty list of 'steps'.")
-        return save_preset(name=name, steps=steps, description=description, target_app=target_app)
+        normalized_steps = [
+            s.model_dump(exclude_none=True) if hasattr(s, "model_dump") else dict(s) for s in steps
+        ]
+        return save_preset(
+            name=name,
+            steps=normalized_steps,
+            description=description,
+            target_app=target_app,
+            pid=pid,
+        )
 
     if act == "delete":
         return delete_preset(name)

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import difflib
 import logging
 import time
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from wayland_computer_use_mcp.a11y import (
     build_compact_hierarchy,
@@ -27,10 +28,49 @@ from wayland_computer_use_mcp.delta import (
 from wayland_computer_use_mcp.portal import global_portal_session
 from wayland_computer_use_mcp.process import (
     check_process_health_and_enrich,
+    get_recent_traceback,
     is_responsive,
 )
+from wayland_computer_use_mcp.tools import emit_ctx_log, emit_ctx_progress
 
 logger = logging.getLogger("wayland_computer_use_mcp.tools.navigation")
+
+
+class BatchActionStep(BaseModel):
+    """Schema for an individual step in batch_actions or preset_workflow."""
+
+    model_config = ConfigDict(extra="allow")
+
+    action: Literal[
+        "interact",
+        "click",
+        "double_click",
+        "right_click",
+        "type",
+        "set_value",
+        "clear",
+        "key",
+        "key_combination",
+        "scroll",
+        "hover",
+        "wait",
+        "wait_for",
+    ]
+    target: str | None = None
+    node_id: str | None = None
+    role: str | None = None
+    text: str | None = None
+    value: float | None = None
+    x: int | None = None
+    y: int | None = None
+    button: Literal["left", "right", "middle"] | None = None
+    keys: list[str] | None = None
+    dx: int | None = None
+    dy: int | None = None
+    duration_ms: int | None = None
+    ms: int | None = None
+    state: Literal["present", "gone", "enabled", "checked", "focused"] | None = None
+    timeout_ms: int | None = None
 
 
 def _match_element(
@@ -83,6 +123,56 @@ def _resolve_target_node_id(pid: int, target: str, role: str | None = None) -> s
     return _match_element(elements, target_lower, role_lower)
 
 
+def _suggest_closest_targets(pid: int, target: str, limit: int = 5) -> list[str]:
+    """Returns closest available element IDs/labels/roles to help agents recover cleanly."""
+    from wayland_computer_use_mcp.a11y import _node_cache
+
+    items = list(_node_cache.get(pid, {}).values())
+    if not items and pid >= 0:
+        try:
+            items = get_application_tree(pid).get("interactive_elements", [])
+        except Exception:
+            items = []
+
+    target_lower = target.strip().lower()
+    suggestions: list[str] = []
+    seen_ids: set[str] = set()
+
+    for elem in items:
+        eid = str(elem.get("id", ""))
+        name = str(elem.get("name", "")).strip()
+        role = str(elem.get("role", "")).strip()
+        if target_lower and (target_lower in name.lower() or target_lower in eid.lower()):
+            if eid and eid not in seen_ids:
+                seen_ids.add(eid)
+                suggestions.append(f"{eid} ('{name}' [{role}])")
+                if len(suggestions) >= limit:
+                    return suggestions
+
+    names = [str(e.get("name", "")).strip() for e in items if e.get("name")]
+    for match in difflib.get_close_matches(target, names, n=limit, cutoff=0.45):
+        for elem in items:
+            eid = str(elem.get("id", ""))
+            name = str(elem.get("name", "")).strip()
+            role = str(elem.get("role", "")).strip()
+            if name == match and eid not in seen_ids:
+                seen_ids.add(eid)
+                suggestions.append(f"{eid} ('{name}' [{role}])")
+                if len(suggestions) >= limit:
+                    return suggestions
+
+    for elem in items:
+        if len(suggestions) >= limit:
+            break
+        eid = str(elem.get("id", ""))
+        name = str(elem.get("name", "")).strip()
+        role = str(elem.get("role", "")).strip()
+        if eid and eid not in seen_ids:
+            seen_ids.add(eid)
+            suggestions.append(f"{eid} ('{name}' [{role}])")
+    return suggestions
+
+
 def inspect_ui_tree(
     pid: int | None = None,
     max_depth: int = 24,
@@ -95,11 +185,20 @@ def inspect_ui_tree(
             )
         ),
     ] = False,
+    query: Annotated[
+        str | None,
+        Field(description="Optional case-insensitive substring filter over element name or ID."),
+    ] = None,
+    role_filter: Annotated[
+        str | None,
+        Field(description="Optional case-insensitive accessible role filter (e.g. 'button')."),
+    ] = None,
 ) -> dict[str, Any]:
     """Inspects semantic accessibility tree and returns functional hierarchy + 1D interactive nodes.
 
     Includes compact functional component hierarchy, actionable elements, screen bounds, and
-    process health by default. Set include_raw_tree=True only when debugging raw AT-SPI nodes.
+    process health by default. Use ``query`` / ``role_filter`` to narrow large trees, or set
+    ``include_raw_tree=True`` only when debugging raw AT-SPI nodes.
     """
     effective_pid = pid or global_portal_session.target_pid
     if not effective_pid:
@@ -113,11 +212,30 @@ def inspect_ui_tree(
     tree = get_application_tree(effective_pid, max_depth=max_depth)
     responsive = is_responsive(effective_pid)
     hierarchy = tree.get("hierarchy") or build_compact_hierarchy(tree)
+    all_elements = tree.get("interactive_elements", [])
+
+    filtered_elements = all_elements
+    q_lower = query.strip().lower() if query else None
+    r_lower = role_filter.strip().lower() if role_filter else None
+    if q_lower or r_lower:
+        filtered_elements = [
+            el
+            for el in all_elements
+            if (
+                not q_lower
+                or q_lower in str(el.get("name", "")).lower()
+                or q_lower in str(el.get("id", "")).lower()
+            )
+            and (not r_lower or r_lower in str(el.get("role", "")).lower())
+        ]
 
     if include_raw_tree:
         tree["pid"] = effective_pid
         tree["responsive"] = responsive
         tree["hierarchy"] = hierarchy
+        if q_lower or r_lower:
+            tree["total_elements_count"] = len(all_elements)
+            tree["interactive_elements"] = filtered_elements
         return tree
 
     payload: dict[str, Any] = {
@@ -126,13 +244,21 @@ def inspect_ui_tree(
         "role": tree.get("role", "application"),
         "responsive": responsive,
     }
+    if "tree_generation" in tree:
+        payload["tree_generation"] = tree["tree_generation"]
+    if tree.get("atspi_available") is False:
+        payload["atspi_available"] = False
+        if tree.get("reason"):
+            payload["reason"] = tree["reason"]
     if "screen_bounds" in tree:
         payload["screen_bounds"] = tree["screen_bounds"]
     bounds = tree.get("bounds")
     if isinstance(bounds, list) and len(bounds) == 4 and bounds[2] > 0 and bounds[3] > 0:
         payload["bounds"] = bounds
     payload["hierarchy"] = hierarchy
-    payload["interactive_elements"] = tree.get("interactive_elements", [])
+    if q_lower or r_lower:
+        payload["total_elements_count"] = len(all_elements)
+    payload["interactive_elements"] = filtered_elements
     return payload
 
 
@@ -141,7 +267,25 @@ def interact_with_node(
         str | None,
         Field(description="Primary target: compact element ID (e.g. 'b1', 'e1') or widget label."),
     ] = None,
-    action: str = "click",
+    action: Literal[
+        "click",
+        "press",
+        "activate",
+        "type",
+        "set_value",
+        "clear",
+        "select_all",
+        "select",
+        "select_range",
+        "select_text",
+        "copy",
+        "paste",
+        "cut",
+        "drag_select",
+        "double_click",
+        "right_click",
+        "hover",
+    ] = "click",
     text: str | None = None,
     value: float | None = None,
     role: Annotated[
@@ -163,8 +307,6 @@ def interact_with_node(
     Level 2 coordinate/keyboard input only when AT-SPI is unsupported, and returns the
     post-action UI tree delta (modified/appeared widgets). Optional ``role`` narrows name matches
     like Playwright's ``getByRole``.
-    Supports actions: click, type, set_value, clear, select_all, select_range, copy,
-    paste, cut, drag_select, double_click, right_click, hover.
     """
     resolved_target = target or node_id
     if not resolved_target:
@@ -190,9 +332,11 @@ def interact_with_node(
         if global_portal_session.is_mock:
             resolved_node_id = resolved_target
         else:
+            suggestions = _suggest_closest_targets(effective_pid, resolved_target)
+            hint = f" Closest matches: {', '.join(suggestions)}" if suggestions else ""
             raise ValueError(
                 f"Element matching '{resolved_target}' not found in "
-                f"accessibility tree for PID {effective_pid}."
+                f"accessibility tree for PID {effective_pid}.{hint}"
             )
 
     act = action.strip().lower()
@@ -210,7 +354,7 @@ def interact_with_node(
 
     target_ident = resolved_node_id or resolved_target
     is_live = effective_pid > 0 and not global_portal_session.is_mock
-    settle_ms = settle_timeout_ms if settle_timeout_ms > 0 else (60 if is_live else 0)
+    settle_ms = settle_timeout_ms if settle_timeout_ms > 0 else (300 if is_live else 0)
     raw_res = wrap_with_delta(
         effective_pid if not global_portal_session.is_mock else 0,
         _execute,
@@ -221,19 +365,140 @@ def interact_with_node(
     return check_process_health_and_enrich(effective_pid, raw_res)
 
 
-def batch_actions(
-    actions: list[dict[str, Any]],
+def _matches_wait_state(
+    elem: dict[str, Any] | None,
+    state: Literal["present", "gone", "enabled", "checked", "focused"],
+) -> bool:
+    if state == "gone":
+        return elem is None
+    if elem is None:
+        return False
+    if state == "present":
+        return True
+    if state == "enabled":
+        return bool(elem.get("enabled"))
+    if state == "checked":
+        return "checked" in elem.get("states", [])
+    if state == "focused":
+        return bool(elem.get("focused") or "focused" in elem.get("states", []))
+    return False
+
+
+def wait_for_element(
+    target: Annotated[
+        str,
+        Field(description="Element ID (e.g. 'b1') or widget label to wait for."),
+    ],
+    role: Annotated[
+        str | None,
+        Field(description="Optional accessible role filter (e.g. 'push button', 'label')."),
+    ] = None,
+    state: Literal["present", "gone", "enabled", "checked", "focused"] = "present",
+    timeout_ms: int = 5000,
+    poll_interval_ms: int = 100,
     pid: int | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Polls AT-SPI until ``target`` satisfies ``state`` or ``timeout_ms`` elapses."""
+    effective_pid = pid or global_portal_session.target_pid
+    if not effective_pid:
+        if global_portal_session.is_mock:
+            effective_pid = 0
+        else:
+            raise RuntimeError(
+                "No active managed application PID. Launch an app first or provide pid."
+            )
+
+    if effective_pid > 0:
+        global_portal_session.target_pid = effective_pid
+
+    target_lower = target.strip().lower()
+    role_lower = role.strip().lower() if role else None
+    start_t = time.monotonic()
+    deadline = start_t + max(0, timeout_ms) / 1000.0
+    interval_sec = max(0.02, poll_interval_ms / 1000.0)
+    emit_ctx_log(ctx, f"Waiting for '{target}' to become '{state}'...")
+
+    matched_elem: dict[str, Any] | None = None
+    while True:
+        if not global_portal_session.is_mock and effective_pid > 0:
+            if not is_responsive(effective_pid):
+                tb = get_recent_traceback(effective_pid)
+                if tb:
+                    raise RuntimeError(
+                        f"Application process (PID {effective_pid}) crashed while waiting!"
+                        f"\n\nTraceback:\n{tb}"
+                    )
+                raise RuntimeError(
+                    f"Application with PID {effective_pid} exited while waiting for '{target}'."
+                )
+
+        tree = get_application_tree(effective_pid)
+        elements = tree.get("interactive_elements", [])
+        elem_by_id = {el.get("id", ""): el for el in elements if el.get("id")}
+        matched_id = (
+            target
+            if target in elem_by_id
+            else _match_element(
+                [(el.get("id", ""), el) for el in elements], target_lower, role_lower
+            )
+        )
+        matched_elem = elem_by_id.get(matched_id) if matched_id else None
+
+        if _matches_wait_state(matched_elem, state):
+            elapsed_ms = int((time.monotonic() - start_t) * 1000)
+            return {
+                "matched": True,
+                "target": target,
+                "state": state,
+                "elapsed_ms": elapsed_ms,
+                "element": matched_elem,
+                "pid": effective_pid,
+            }
+
+        if time.monotonic() >= deadline:
+            elapsed_ms = int((time.monotonic() - start_t) * 1000)
+            return {
+                "matched": False,
+                "target": target,
+                "state": state,
+                "elapsed_ms": elapsed_ms,
+                "element": matched_elem,
+                "pid": effective_pid,
+            }
+
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(interval_sec, remaining))
+
+
+def _classify_batch_error(exc: Exception) -> tuple[str, str]:
+    msg = str(exc).lower()
+    if isinstance(exc, PermissionError) or "prohibited" in msg or "blocked" in msg:
+        return "permission_denied", "Action blocked by security policy or shortcut filter."
+    if isinstance(exc, TimeoutError) or "timed out" in msg:
+        return "timeout", "Increase timeout_ms or inspect_ui_tree to check current app state."
+    if "crashed" in msg or "exited" in msg or "not active or responsive" in msg:
+        return "process_crashed", "Inspect get_app_logs(), fix the underlying error, and relaunch."
+    if "not found" in msg or "stale node" in msg:
+        return "element_not_found", "Run inspect_ui_tree() and target element by label + role."
+    if isinstance(exc, ValueError):
+        return "invalid_step", "Verify required step keys (target/x/y/text/keys) match schema."
+    return "action_failed", "Inspect failure_screenshot or call inspect_ui_tree() before retrying."
+
+
+def batch_actions(
+    actions: list[BatchActionStep],
+    pid: int | None = None,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Executes a sequence of consecutive UI interactions with fail-fast reporting.
 
-    Supported step schemas:
-    - {"action": "interact"|"click"|"double_click"|"right_click", "target": "b1"}
-    - {"action": "type"|"set_value"|"clear", "target": "e1", "text": "hello"}
-    - {"action": "click", "x": 100, "y": 200, "button": "left"}
-    - {"action": "key", "keys": ["ctrl", "a"]}
-    - {"action": "hover", "target": "b1"}
-    - {"action": "wait", "ms": 200}
+    Supported step actions:
+    - interact/click/double_click/right_click (by ``target`` or ``x, y``)
+    - type/set_value/clear (by ``target`` or focused input)
+    - key / key_combination (``keys``), scroll (``dx, dy``), hover
+    - wait (``ms``) and wait_for (``target``, ``state``, ``timeout_ms``)
     """
     effective_pid = pid or global_portal_session.target_pid
     if not effective_pid:
@@ -249,10 +514,16 @@ def batch_actions(
     is_live = effective_pid > 0 and not global_portal_session.is_mock
     batch_before = snapshot_interactive_state(effective_pid) if is_live else {}
 
-    for idx, step in enumerate(actions, start=1):
-        action_type = step.get("action", "").lower()
+    for idx, raw_step in enumerate(actions, start=1):
+        step: dict[str, Any] = (
+            raw_step.model_dump(exclude_none=True)
+            if hasattr(raw_step, "model_dump")
+            else dict(raw_step)
+        )
+        action_type = str(step.get("action", "")).lower()
+        emit_ctx_progress(ctx, idx - 1, total_steps, f"Step {idx}/{total_steps}: {action_type}")
         before = None
-        if is_live and action_type != "wait":
+        if is_live and action_type not in ("wait", "wait_for"):
             before = snapshot_interactive_state(effective_pid)
 
         try:
@@ -331,6 +602,28 @@ def batch_actions(
                 time.sleep(ms / 1000.0)
                 step_res = f"Waited {ms}ms"
 
+            elif action_type == "wait_for":
+                if not raw_target:
+                    raise ValueError(f"Step {idx} 'wait_for' requires target")
+                wait_state = str(step.get("state", "present")).lower()
+                wait_timeout = int(step.get("timeout_ms", 5000))
+                wait_res = wait_for_element(
+                    target=str(raw_target),
+                    role=step_role,
+                    state=wait_state,  # type: ignore[arg-type]
+                    timeout_ms=wait_timeout,
+                    pid=effective_pid,
+                    ctx=ctx,
+                )
+                if not wait_res["matched"]:
+                    raise TimeoutError(
+                        f"Timed out waiting for '{raw_target}' to become '{wait_state}' "
+                        f"after {wait_res['elapsed_ms']}ms"
+                    )
+                step_res = (
+                    f"Element '{raw_target}' matched '{wait_state}' ({wait_res['elapsed_ms']}ms)"
+                )
+
             else:
                 raise ValueError(f"Unknown action type '{action_type}' at step {idx}")
 
@@ -360,11 +653,14 @@ def batch_actions(
             )
 
         except Exception as exc:
+            error_code, recovery_hint = _classify_batch_error(exc)
             failure_info: dict[str, Any] = {
                 "status": "failed",
                 "failed_step": idx,
                 "total_steps": total_steps,
                 "error": str(exc),
+                "error_code": error_code,
+                "recovery_hint": recovery_hint,
                 "executed_steps": executed_results,
                 "steps": step_records,
             }
@@ -386,6 +682,7 @@ def batch_actions(
         if is_live and batch_before
         else {"modified": [], "appeared": [], "hidden": []}
     )
+    emit_ctx_progress(ctx, total_steps, total_steps, "Batch actions complete")
     return {
         "status": "success",
         "executed_steps_count": len(executed_results),
@@ -399,6 +696,7 @@ def batch_actions(
 def watch_ui_events(
     timeout_ms: int = 500,
     pid: int | None = None,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Awaits UI settlement by monitoring real-time AT-SPI2 D-Bus mutation events.
 
@@ -406,6 +704,7 @@ def watch_ui_events(
     to re-query the full accessibility tree after triggers.
     """
     effective_pid = pid or global_portal_session.target_pid
+    emit_ctx_log(ctx, f"Watching AT-SPI UI events for up to {timeout_ms}ms")
     global_event_listener.start()
     res = global_event_listener.wait_for_settled(timeout_ms=timeout_ms, pid=effective_pid)
     res["pid"] = effective_pid
@@ -424,3 +723,4 @@ def register_navigation_tools(mcp: FastMCP) -> None:
     mcp.tool(annotations=mutate_ann)(interact_with_node)
     mcp.tool(annotations=mutate_ann)(batch_actions)
     mcp.tool(annotations=readonly_ann)(watch_ui_events)
+    mcp.tool(annotations=readonly_ann)(wait_for_element)

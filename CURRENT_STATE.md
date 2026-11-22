@@ -39,37 +39,39 @@ This document provides a technical component-by-component breakdown of `wayland-
 ## 2. Component Packages Breakdown
 
 ### A. FastMCP Server Entrypoint ([`server.py`](file:///home/niklas/Documents/Coding/Hobby/wayland_computer_use_mcp/src/wayland_computer_use_mcp/server.py))
-- **Role**: Exposes 22 default tools (+ 2 opt-in desktop installer tools when `--enable-desktop-installer` / `WAYLAND_MCP_ENABLE_DESKTOP_INSTALLER=1` is set), 1 prompt (`wayland_automation_guide`), and 1 resource (`wayland://system_prompt`) over the MCP JSON-RPC protocol via `fastmcp.FastMCP` with MCP `ToolAnnotations` hints.
+- **Role**: Exposes 18 default tools (+ 2 opt-in desktop installer tools when `--enable-desktop-installer` / `WAYLAND_MCP_ENABLE_DESKTOP_INSTALLER=1` is set), 1 prompt (`wayland_automation_guide`), and 1 resource (`wayland://system_prompt`) over the MCP JSON-RPC protocol via `fastmcp.FastMCP` with MCP `ToolAnnotations` hints, strict `Literal` / Pydantic input schemas, and embedded Tree-First `FastMCP(instructions=...)`.
+- **Architecture Split (`core/`, `blackbox/`, `compat/`)**: Separates driver-agnostic `SessionContext`, `WindowSessionState`, & `SessionDriver` contracts (`core/`) from the primary isolated Blackbox nested-compositor engine (`blackbox/`: `kwin_wayland` EIS + pure-Python `wlroots` screencopy/virtual-input wire clients for `labwc`/`sway`) and secondary live host XDG Portal driver (`compat/`).
 - **Modularity**: Imports and re-exports tool suites from `wayland_computer_use_mcp.tools.*` with a cleanly sorted `__all__`.
-- **CLI Configuration**: Evaluates arguments (`--live`, `--virtual`, `--virtual-window`, `--window-only`, `--fullscreen`, `--enable-desktop-installer`, `-h`/`--help`, `-v`/`--version`) before launching the FastMCP transport loop.
+- **CLI Configuration**: Evaluates arguments (`--auto`, `--live`, `--virtual`, `--virtual-window`, `--window-only`, `--fullscreen`, `--lazy-portal`, `--enable-desktop-installer`, `-h`/`--help`, `-v`/`--version`) with `"auto"` as the default Playwright-style mode before launching the FastMCP transport loop.
 - **Packaging**: Pure-Python core dependencies (`fastmcp`, `dbus-fast`, `pillow`); `PyGObject` moved to optional `[gstreamer]` extra, unused `pycairo` removed.
-- **Graceful Lifecycle Cleanup**: Intercepts `SIGINT`, `SIGTERM`, and `atexit` to terminate spawned processes and safely release XDG portal sessions, pooled AT-SPI D-Bus connections, and PipeWire streams.
+- **Graceful Lifecycle Cleanup**: Intercepts `SIGINT`, `SIGTERM`, and `atexit` to terminate spawned processes and safely release virtual sandboxes, XDG portal sessions, pooled AT-SPI D-Bus connections, and PipeWire streams.
 
 ---
 
 ### B. Modular Tools Package ([`tools/`](file:///home/niklas/Documents/Coding/Hobby/wayland_computer_use_mcp/src/wayland_computer_use_mcp/tools/))
-Partitioned into 6 focused domain sub-modules (22 default tools + 2 opt-in tools):
-1. **`input_tools.py`** (8 tools):
-   - `click`, `double_click`, `right_click`, `hover`, `drag`, `scroll`, `type_text`, `key_combination`.
-   - All 8 input tools accept an optional `pid: int | None = None` parameter and consistently return structured `InteractionResult` dictionaries with `ui_changes`.
-2. **`navigation_tools.py`** (4 tools):
-   - `inspect_ui_tree(pid, max_depth)`: Returns the collapsed 1D interactive widget list with compact IDs (`b1`, `e1`, `c1`, `sw1`, `li1`) and tracked `states`.
-   - `interact_with_node(target, action, text, value, role, node_id, pid, settle_timeout_ms, ...)`: Core semantic-first dispatcher (`target` primary, `node_id` deprecated alias, Playwright-style `role` filter) with event-driven settlement and structured `ui_changes` diffs.
-   - `batch_actions(actions, pid)`: Executes consecutive interactions atomically with optional per-step `"role"` filtering, step-by-step delta tracking, and automatic `batch_failure.png` trace capture on live failures.
+Partitioned into 6 focused domain sub-modules (18 default tools + 2 opt-in tools):
+1. **`input_tools.py`** (2 consolidated MCP tools + 8 Python helper exports):
+   - `mouse(action, x, y, end_x, end_y, button, duration_ms, dx, dy, pid)` and `keyboard(action, text, keys, x, y, pid)` replace the 8 separate raw input schemas on FastMCP while keeping `click`, `double_click`, `right_click`, `hover`, `drag`, `scroll`, `type_text`, and `key_combination` exported in Python. All consistently return structured `InteractionResult` dictionaries with `ui_changes`.
+2. **`navigation_tools.py`** (5 tools):
+   - `inspect_ui_tree(pid, max_depth, include_raw_tree, query, role_filter)`: Returns a compact functional `hierarchy`, `tree_generation`, and collapsed 1D `interactive_elements` list by default (`include_raw_tree=True` opts into full raw nodes), with search filtering.
+   - `interact_with_node(target, action, text, value, role, node_id, pid, settle_timeout_ms, ...)`: Core semantic-first dispatcher (`target` primary, `node_id` deprecated alias, `Literal` action enum, Playwright-style `role` filter, stale-ID identity rebinding, closest-match error hints) with event-driven settlement and structured `ui_changes` diffs.
+   - `wait_for_element(target, role, state, timeout_ms, poll_interval_ms, pid)`: Polls until `present`/`gone`/`enabled`/`checked`/`focused` (crash-aware).
+   - `batch_actions(actions, pid)`: Executes typed `BatchActionStep` sequences atomically with optional per-step `"role"` filtering, step-by-step + net delta tracking, structured `error_code`/`recovery_hint` on errors, and automatic `batch_failure.png` trace capture on live failures.
    - `watch_ui_events(timeout_ms, pid)`: Streams accessibility events directly from AT-SPI2 D-Bus to track asynchronous UI changes.
 3. **`preset_tools.py`** (1 tool):
-   - `preset_workflow(action, name, description, steps, pid)`: Manages and executes reusable multi-step interaction macro presets (`list`, `run`, `view`, `save`, `delete`).
+   - `preset_workflow(action, name, description, steps, pid)`: Manages and executes reusable multi-step interaction macro presets (`list`, `run`, `view`, `save`, `delete`), auto-normalizing positional node IDs (`b1`) to semantic `target` + `role` locators on save.
 4. **`visual_tools.py`** (1 tool):
-   - `capture_window_frame(crop_box, save_artifact, pid)`: Returns MCP in-memory `ImageContent` by default to prevent storage leaks, saving to disk only when `save_artifact=True`.
-5. **`process_tools.py`** (5 tools):
-   - `launch_app(target, args, restart, cwd)`: Spawns GUI apps or scripts with automatic venv discovery, returning the **initial interactive UI tree immediately** to eliminate an extra tool call.
+   - `capture_window_frame(crop_box, save_artifact, pid, target, annotate_elements)`: Returns MCP in-memory `ImageContent` by default (with HiDPI scaling, optional widget-targeted crop + missing-target hint, optional Set-of-Marks overlay, and rolling screenshot pruning when `save_artifact=True`).
+5. **`process_tools.py`** (6 tools):
+   - `launch_app(target, args, restart, cwd, ready_timeout_ms)`: Spawns GUI apps (Python venvs, `$PATH` binaries, Electron/Chromium with auto-accessibility flags), waits briefly until UI/window ready, and returns initial `interactive_elements`, compact `hierarchy`, and `session` status (or `exited_early` payload with `logs`/`traceback` + `recovery_hint` on startup failure).
    - `restart_app(pid)`: Gracefully terminates and re-launches an active process, preserving original launch arguments and working directory. Strictly validates process ownership: unmanaged or user-opened applications raise `PermissionError` to preserve desktop consistency.
    - `list_managed_apps()`: Lists all active sessions and prunes dead/externally-closed PIDs.
-   - `terminate_app(pid)`: Clean termination (`SIGTERM` escalated to `SIGKILL`).
+   - `terminate_app(pid)`: Clean termination (`SIGTERM` escalated to `SIGKILL`) and idle virtual window teardown.
    - `get_app_logs(pid, lines)`: Retrieves console output and crash tracebacks from circular buffer.
+   - `get_session_status()`: Reports active mode, compositor adapter, input readiness, target PID/bounds, and active app count.
 6. **`system_tools.py`** (3 default tools + 2 opt-in tools):
-   - `clipboard_read`, `clipboard_write`: Portal-first clipboard (`org.freedesktop.portal.Clipboard`) with `wl-paste`/`wl-copy`, `qdbus6`/`qdbus`, and `xclip` fallbacks.
-   - `window_control(action, pid)`: State control (`minimize`, `maximize`, `restore`, `close`).
+   - `clipboard_read`, `clipboard_write`: Portal / native Wayland `ext_data_control_manager_v1` / `zwlr_data_control_manager_v1` clipboard with `wl-paste`/`wl-copy`, `qdbus6`/`qdbus`, and `xclip` fallbacks.
+   - `window_control(action, pid)`: State control (`minimize`, `maximize`, `restore`, `focus`, `close`).
    - Opt-in (`register_desktop_installer_tools`): `install_to_desktop`, `uninstall_from_desktop` for universal Linux `.desktop` launcher registration.
 
 ---
@@ -82,11 +84,13 @@ Partitioned into 6 focused domain sub-modules (22 default tools + 2 opt-in tools
   - Real-time AT-SPI2 D-Bus signal monitoring (`Object:StateChanged`, `ChildrenChanged`, `TextChanged`, `Window:Activate`).
   - Implements `wait_for_settled(timeout_ms, pid)` to guarantee UI event settlement before returning deltas.
 - **`tree.py`**:
+  - Bulk tree fetching via `org.a11y.atspi.Cache.GetItems` with completeness checks and parallel recursive `_traverse_node` fallback.
   - Deep traversal across complex modern widget trees (Libadwaita `ToolbarView -> Overlay -> ScrolledWindow -> Viewport -> Box`).
   - Prunes non-interactive layout containers into a compact 1D element list (`flatten_tree`).
-  - Maintains `_node_cache` mapping compact IDs (`b1`, `e1`, `c1`) to D-Bus object paths and geometry.
+  - Tracks per-PID `tree_generation` counters, active dialog/window prioritization (`extract_active_window_node`), and `_node_cache` identity metadata (`id`, `path`, `name`, `role`, `tree_generation`).
 - **`actions.py`**:
   - **Hybrid Semantic-First Execution Dispatcher (Zero Cursor Hijack)**:
+    - Pre-action cached-node identity verification (`_verify_cached_node_identity`) to detect and re-bind stale positional IDs (`b1`).
     1. Level 1 programmatic execution (silent, zero pointer motion):
        - Direct activations: Invokes `org.a11y.atspi.Action.DoAction(0)` on buttons, checkboxes, tabs, and menu items.
        - Range controls: Sets `action="set_value"` atomically via `org.a11y.atspi.Value` (`CurrentValue`) without physical drag gestures.
@@ -156,9 +160,9 @@ The server enforces a **Hybrid Semantic-First Execution Model**:
 
 | Test Suite | File | Tests | Pass Rate |
 | :--- | :--- | :--- | :--- |
-| **Live GUI E2E Suite** | [`tests/test_live_example_app.py`](file:///home/niklas/Documents/Coding/Hobby/wayland_computer_use_mcp/tests/test_live_example_app.py) | 15 | **100%** (15/15) |
-| **Unit & Non-Live Tests** | `tests/test_*.py` | 139 (`-m "not live"`) | **100%** (139/139) |
-| **Host AT-SPI Shielding** | `tests/test_virtual_session.py` | 1 (`live` / `virtual` marker) | Isolated `XDG_RUNTIME_DIR` |
-| **Ruff Code Style** | `src/`, `tests/` | 70 files | **100%** Clean (0 errors) |
+| **Live GUI E2E Suite** | [`tests/test_live_example_app.py`](file:///home/niklas/Documents/Coding/Hobby/wayland_computer_use_mcp/tests/test_live_example_app.py) | 18 | **100%** (18/18) |
+| **Unit & Non-Live Tests** | `tests/test_*.py` | 103 (`-m "not live"`) | **100%** (103/103) |
+| **Host AT-SPI Shielding** | [`tests/test_virtual_session.py`](file:///home/niklas/Documents/Coding/Hobby/wayland_computer_use_mcp/tests/test_virtual_session.py) | 1 (`live` / `virtual` marker) | Isolated `XDG_RUNTIME_DIR` |
+| **Ruff Code Style** | `src/`, `tests/` | 75 files | **100%** Clean (0 errors) |
 | **Packaging (PEP 561 / Wheel)**| `pyproject.toml`, `py.typed` | Pure `py3-none-any` | Built via `uv build` |
 | **Vulture Dead Code** | `src/` | 58 files | **0 Dead Code** (Code 0) |

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 _PROJECT_MARKERS = (
@@ -104,3 +105,49 @@ def get_artifacts_dir(subdir: str = "screenshots") -> Path:
     target_dir = cache_home / "wayland-computer-use-mcp" / "artifacts" / subdir
     target_dir.mkdir(parents=True, exist_ok=True)
     return target_dir
+
+
+def prune_artifacts(
+    subdir: str = "screenshots",
+    max_files: int = 25,
+    max_age_hours: float = 24.0,
+) -> int:
+    """Removes expired or excess oldest files from an artifact directory (never presets)."""
+    if subdir == "presets":
+        return 0
+    try:
+        target_dir = get_artifacts_dir(subdir)
+        if not target_dir.is_dir():
+            return 0
+        files = [p for p in target_dir.iterdir() if p.is_file()]
+        if not files:
+            return 0
+
+        removed = 0
+        cutoff = time.time() - max(0.0, max_age_hours) * 3600.0
+        kept: list[tuple[float, Path]] = []
+        for p in files:
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                continue
+            if max_age_hours > 0 and mtime < cutoff:
+                try:
+                    p.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+            else:
+                kept.append((mtime, p))
+
+        if max_files >= 0 and len(kept) > max_files:
+            kept.sort(key=lambda item: item[0])
+            for _, p in kept[: len(kept) - max_files]:
+                try:
+                    p.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        return removed
+    except Exception:
+        return 0

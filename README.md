@@ -9,7 +9,7 @@
 
 Unlike conventional "computer use" agents that rely on high-latency video streaming and expensive pixel-based coordinate guessing, `wayland-computer-use-mcp` implements a **Tree-First Hybrid Semantic Execution Model**:
 - **Atomic Programmatic Execution**: Inspects semantic widget trees via AT-SPI2 D-Bus interfaces and executes actions (`DoAction`, `EditableText`, `Value`, `Text`) silently without moving the physical cursor.
-- **Zero-Disruption Interactions**: The desktop pointer only moves on explicit pointer tools (`click`, `hover`, `drag`) or when Level 1 AT-SPI is unsupported and Level 2 fallback is needed.
+- **Zero-Disruption Interactions**: The desktop pointer only moves on explicit pointer calls (`mouse`) or when Level 1 AT-SPI is unsupported and Level 2 fallback is needed.
 - **Playwright-Style Locators & Deltas**: Supports optional `role` disambiguation (`target="Save", role="push button"`), event-driven UI settlement (`watch_ui_events`), and compact state diffs.
 - **Resilient Physical Fallback**: Custom canvas widgets, dropdown popovers, and complex surfaces fall back smoothly to clamped physical pointer clicks, drags, discrete wheel scrolls, and keystrokes.
 
@@ -30,9 +30,9 @@ Traditional screenshot-driven computer use models stream full monitor or window 
 
 ### Why This Architecture Conserves Tokens:
 1. **1D Semantic Flattening**: Automatically filters out invisible layout containers (`GtkBox`, `GtkOverlay`, `QBoxLayout`), distilling only actionable widgets into a compact array of indexed elements (`b1`, `e1`, `c1`) with their role, state, and label.
-2. **Direct Element Interaction**: Programmatic invocation via `interact_with_node(node_id="b1")` executes atomically without requiring intermediate verification screenshots.
+2. **Direct Element Interaction**: Programmatic invocation via `interact_with_node(target="b1")` executes atomically without requiring intermediate verification screenshots.
 3. **Reactive State Diffing**: Every action automatically computes a pre- and post-interaction semantic delta, returning a concise markdown summary (e.g. `b1 [button]: text '0 clicks' ➔ '1 clicks'`), eliminating redundant tree re-polling.
-4. **Selective Visual Grounding**: High-resolution window captures (`capture_window_frame`) are utilized selectively for custom canvas layouts or styling/visual verification checkpoints.
+4. **Selective Visual Grounding**: High-resolution window captures (`capture_window_frame(target=..., annotate_elements=True)`) are utilized selectively for custom canvas layouts or styling/visual verification checkpoints.
 
 ---
 
@@ -41,11 +41,13 @@ Traditional screenshot-driven computer use models stream full monitor or window 
 The server operates in two distinct display modes and supports fine-grained access scopes:
 
 ### 1. Display Modes & Blackbox Architecture
+- **Auto Mode (`--auto` or `WAYLAND_MCP_DISPLAY_MODE="auto"`)** *(Default)*:
+  - Automatically isolates the session in a Playwright-style Blackbox compositor whenever `dbus-daemon` and a supported compositor (`kwin_wayland`, `labwc`, `sway`, or `weston`) are installed — using a visible nested window when `WAYLAND_DISPLAY` is present, or a headless virtual compositor otherwise — and falls back cleanly to lazy host-passthrough (`live`) when none is available.
 - **Virtual / Blackbox Mode (`--virtual`, `--virtual-window`, `WAYLAND_MCP_DISPLAY_MODE="virtual"`, or `WAYLAND_MCP_DISPLAY_MODE="virtual-window"`)**:
   - Starts a private `XDG_RUNTIME_DIR`, isolated `dbus-daemon`, isolated AT-SPI2 bus, and a dedicated nested/headless compositor (`kwin_wayland` via direct EIS, `labwc`/`sway` via pure-Python `zwlr_screencopy_manager_v1` + virtual pointer/keyboard protocols, or `weston`), keeping your host pointer, focus, and clipboard untouched without triggering host portal prompts.
   - `--virtual`: Headless virtual Wayland compositor for unattended/CI runs.
   - `--virtual-window` / `WAYLAND_MCP_DISPLAY_MODE="virtual-window"` / `WAYLAND_MCP_VIRTUAL_HEADED=1`: Opens a **Playwright-style visible nested compositor window** so you can watch the agent drive an app in its own isolated window.
-- **Live Host-Passthrough Mode (`--live` or `WAYLAND_MCP_DISPLAY_MODE="live"`)** *(Default)*:
+- **Live Host-Passthrough Mode (`--live` or `WAYLAND_MCP_DISPLAY_MODE="live"`)**:
   - Connects to the user's active desktop session via `$WAYLAND_DISPLAY`, session D-Bus, and AT-SPI2 bus.
   - Caches and reuses XDG Desktop Portal `restore_token` credentials to prevent repeated permission prompts.
   - Optional `--lazy-portal` / `WAYLAND_MCP_LAZY_PORTAL=1`: Defers XDG RemoteDesktop/ScreenCast prompts until a screenshot (`capture_window_frame`) or physical pointer/keyboard fallback is requested, keeping pure AT-SPI interaction prompt-free.
@@ -74,10 +76,10 @@ To guarantee safe operation despite upstream protocol constraints, this server i
    All injected pointer coordinates are mathematically clamped to $[0 \le x \le W, 0 \le y \le H]$ of the target application surface. The server strictly forbids emitting coordinates outside the active window frame.
 2. **Dynamic Geometry Drift Detection (`GeometryDivergenceDetector`)**:
    Monitors the baseline window surface position and dimensions. If a window moves, resizes, or unminimizes unexpectedly while an action is pending, the operation is immediately aborted to prevent clicks from spilling into adjacent desktop surfaces.
-3. **Hardware User Preemption (`UserInterventionDetector`)**:
-   Tracks physical hardware cursor activity. If the user moves the physical mouse or types on the keyboard, automated interactions pause instantly to yield control to the human operator.
-4. **Dangerous Shortcut Blacklist (`ShortcutFilter`)**:
-   Blocks hazardous keyboard sequences (e.g. `Super/Meta`, `Ctrl+Alt+Delete`, `Alt+F4`, VT terminal switching).
+3. **User Input Preemption (`UserPreemptionManager`)**:
+   Pauses automated interactions via `Window:Activate` focus-switch monitoring in `live` mode or programmatic pause (`set_paused(True)`) to yield control back to the user.
+4. **Dangerous Shortcut Blacklist (`SystemShortcutFilter`)**:
+   Blocks hazardous keyboard sequences (e.g. `Super/Meta`, `Ctrl+Alt+*`, `Alt+F4`, `PrintScreen`, `SysRq`, `Power`).
 5. **Virtual Display Sandbox Recommendation**:
    For evaluating autonomous agents or untrusted scripts, execute with `--virtual` to provide hardware-level process and display server isolation.
 
@@ -187,34 +189,30 @@ uv sync
 
 ---
 
-## Exposed Tool Suite (22 Default Tools + 2 Opt-In Tools)
+## Exposed Tool Suite (18 Default Tools + 2 Opt-In Tools)
 
-### 1. Tree-First Semantic Navigation & Macro Presets (5 Tools)
-- **`inspect_ui_tree(pid, max_depth)`**: Returns the collapsed 1D interactive element list (`b1`, `e1`, `c1`, `sw1`, `li1`) with widget names, roles, compact `states`, and coordinates.
-- **`interact_with_node(target, action, text, value, role, pid, settle_timeout_ms, ...)`**: Dispatches semantic interactions by compact ID (`b1`) or widget label (`node_id` kept as deprecated alias; optional `role` narrows matches like Playwright's `getByRole`). Executes Level 1 AT-SPI directly without moving the mouse cursor, falling back to physical input only when required. Returns structured JSON UI deltas.
-- **`batch_actions(actions, pid)`**: Executes a batch of sequential UI operations atomically with step-by-step delta tracking, optional per-step `"role"` filtering, and automatic `batch_failure.png` trace capture when a live step fails.
-- **`preset_workflow(action, name, description, steps, pid)`**: Manages and executes reusable multi-step interaction presets (`list`, `run`, `view`, `save`, `delete`) stored as persistent JSON artifacts.
+### 1. Tree-First Semantic Navigation & Macro Presets (6 Tools)
+- **`inspect_ui_tree(pid, max_depth, include_raw_tree, query, role_filter)`**: Returns a compact functional `hierarchy`, monotonic `tree_generation`, and collapsed 1D `interactive_elements` list (`b1`, `e1`, `c1`, `sw1`, `li1`) fetched via bulk `Cache.GetItems` with parallel recursive fallback (pass `query`/`role_filter` to filter large UIs or `include_raw_tree=True` for full D-Bus nodes).
+- **`interact_with_node(target, action, text, value, role, pid, settle_timeout_ms, ...)`**: Dispatches semantic interactions by compact ID (`b1`) or widget label (`node_id` kept as deprecated alias; optional `role` narrows matches like Playwright's `getByRole`) with stale-ID identity verification & rebinding. Executes Level 1 AT-SPI directly without moving the mouse cursor, falling back to physical input only when required. Returns structured JSON UI deltas and closest-match hints on lookup misses.
+- **`wait_for_element(target, role, state, timeout_ms, poll_interval_ms, pid)`**: Polls until an element reaches `"present"`, `"gone"`, `"enabled"`, `"checked"`, or `"focused"` (fail-fast if the process crashes).
+- **`batch_actions(actions, pid)`**: Executes a typed `BatchActionStep` sequence atomically (`click`, `type`, `wait`, `wait_for`, etc.) with step-by-step + net delta tracking, structured `error_code` / `recovery_hint`, and automatic `batch_failure.png` trace capture on live failures.
+- **`preset_workflow(action, name, description, steps, pid)`**: Manages and executes reusable multi-step interaction presets (`list`, `run`, `view`, `save`, `delete`) stored as persistent JSON artifacts, auto-normalizing positional node IDs (`b1`) into stable semantic `target` + `role` locators on save.
 - **`watch_ui_events(timeout_ms, pid)`**: Streams AT-SPI2 D-Bus accessibility events (`Object:StateChanged`, `ChildrenChanged`, `TextChanged`, `Window:Activate`) directly to observe async UI changes.
 
-### 2. Clamped Physical Input (8 Tools)
-- **`click(x, y, button, pid)`**: Executes a mouse click clamped to window bounds.
-- **`double_click(x, y, button, pid)`**: Dispatches a standard mouse double-click.
-- **`right_click(x, y, pid)`**: Dispatches a right-click (context menu).
-- **`hover(x, y, duration_ms, pid)`**: Moves pointer without clicking, activating Wayland tooltips or hover highlights.
-- **`drag(start_x, start_y, end_x, end_y, pid)`**: Performs a clamped mouse drag gesture.
-- **`scroll(dx, dy, pid)`**: Dispatches pointer wheel ticks via `NotifyPointerAxisDiscrete` and continuous deltas.
-- **`type_text(text, x, y, pid)`**: Types text using evdev keycodes with automated clipboard paste fallback for strings > 30 characters.
-- **`key_combination(keys, pid)`**: Sends modifier hotkeys (e.g. `["ctrl", "s"]`, `["alt", "tab"]`). All 8 input tools accept an optional `pid` to explicitly target a specific application window.
+### 2. Clamped Physical Input (2 Consolidated Tools)
+- **`mouse(action, x, y, end_x, end_y, button, duration_ms, dx, dy, pid)`**: Consolidated pointer tool supporting `action="click" | "double_click" | "right_click" | "hover" | "drag" | "scroll"`, all clamped strictly within the target window bounds.
+- **`keyboard(action, text, keys, x, y, pid)`**: Consolidated keyboard tool supporting `action="type" | "keys"` with live XKB keymap synthesis, automated clipboard paste fallback for strings > 30 chars, and dangerous OS shortcut blocking.
 
 ### 3. Visual Grounding & Inspection (1 Tool)
-- **`capture_window_frame(crop_box, save_artifact, pid)`**: Captures a high-resolution window frame. In-memory MCP `ImageContent` by default; saves rolling disk cache when `save_artifact=True`.
+- **`capture_window_frame(crop_box, save_artifact, pid, target, annotate_elements)`**: Captures a high-resolution window frame (with HiDPI scaling compensation, optional widget-targeted crop with closest-match hint when missing, and optional Set-of-Marks `b1`/`e1` overlay). In-memory MCP `ImageContent` by default; saves rolling disk cache (auto-pruned) when `save_artifact=True`.
 
-### 4. Process Lifecycle & Crash Interception (5 Tools)
-- **`launch_app(target, args, restart, cwd)`**: Spawns Python GUI scripts or system apps with automatic virtual environment discovery. **Immediately returns the initial interactive element tree** so agents can act without a separate `inspect_ui_tree` call.
+### 4. Process Lifecycle, Diagnostics & Session Status (6 Tools)
+- **`launch_app(target, args, restart, cwd, ready_timeout_ms)`**: Spawns Python GUI scripts, Electron/Tauri/Chromium apps (auto-enabling Wayland + renderer accessibility), Rust/C++ binaries, or `$PATH` commands, waiting briefly until ready and returning initial `interactive_elements`, compact `hierarchy`, and `session` status (or structured `exited_early` recovery payload with `logs`/`traceback` on startup crash).
 - **`restart_app(pid)`**: Gracefully terminates and re-launches an active process, preserving original launch arguments and working directory. Strictly validates process ownership: unmanaged or user-opened applications raise `PermissionError` to preserve desktop consistency.
 - **`terminate_app(pid)`**: Terminates application processes cleanly (`SIGTERM` escalated to `SIGKILL`).
 - **`list_managed_apps()`**: Lists all active processes managed by the MCP server, pruning dead PIDs.
 - **`get_app_logs(pid, lines)`**: Retrieves console output and crash tracebacks from a thread-safe circular buffer.
+- **`get_session_status()`**: Reports active display mode, compositor adapter, input readiness, target PID/window bounds, and managed process count.
 
 ### 5. OS & Desktop Integration (3 Default Tools + 2 Opt-In Tools)
 - **`clipboard_read()`**: Reads text from clipboard (`org.freedesktop.portal.Clipboard` and native Wayland `ext_data_control_manager_v1`/`zwlr_data_control_manager_v1` first, falling back to `wl-paste`, `qdbus`, `xclip`).
@@ -253,9 +251,9 @@ uv run pytest tests/test_live_example_app.py -v
 
 | Compositor / Desktop | Status | Verified Capabilities |
 | :--- | :--- | :--- |
-| **KDE Plasma 6** (`kwin_wayland`) | ✅ Live-tested | All 22 MCP tools verified live in both `live` mode (XDG Portal RemoteDesktop + ScreenCast, `libei` + live XKB keymaps, AT-SPI2, clipboard, KWin window control) and isolated `--virtual-window` mode (private `XDG_RUNTIME_DIR` + D-Bus + nested `kwin_wayland` + direct `kwin_eis` + native Wayland data-control clipboard). |
-| **GNOME Shell** (`Mutter`, Ubuntu 26.04) | ✅ Live-tested | `tests/test_live_example_app.py` (15/15) & `tests/test_interactive_live.py` verified live: XDG Portal RemoteDesktop + ScreenCast (including single-window selection with window-origin mapping), `libei` input + AT-SPI2 keyboard fallbacks (dropdowns, sliders, tabs, text entry). |
-| **wlroots** (`Sway`, `Hyprland`) | 🧪 Unit-tested | Backend implemented (`swaymsg` / `hyprctl`) and covered by unit tests; full live compositor runs not yet verified. |
+| **KDE Plasma 6** (`kwin_wayland`) | ✅ Live-tested | Full MCP suite verified live in both `live` mode (XDG Portal RemoteDesktop + ScreenCast, `libei` + live XKB keymaps, AT-SPI2, clipboard, KWin window control) and isolated `--virtual-window` mode (private `XDG_RUNTIME_DIR` + D-Bus + nested `kwin_wayland` + direct `kwin_eis` + native Wayland data-control clipboard). |
+| **GNOME Shell** (`Mutter`) & **`labwc` Blackbox** | ✅ Live-tested | `tests/test_live_example_app.py` (18 E2E UI tests) and `tests/test_virtual_session.py` verified live under GNOME (`labwc` Blackbox nested window via `zwlr_screencopy_manager_v1` + virtual pointer/keyboard protocols) as well as GNOME host portals (`RemoteDesktop` + `ScreenCast`). |
+| **wlroots** (`Sway`, `Hyprland`, `labwc`) | ✅ CI + Unit-tested | Host IPC backend (`swaymsg` / `hyprctl`), isolated Blackbox `labwc` + `sway` headless matrix in GitHub Actions CI (`WLR_BACKENDS=headless`), and wire-protocol unit tests. |
 
 > **GNOME Note:** On GNOME Shell, enable **"Remember This Selection"** in the Remote Desktop portal dialog if you want persistent portal restore tokens across runs, and either share the target window directly or select a monitor when prompted.
 

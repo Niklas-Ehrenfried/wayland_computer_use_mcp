@@ -2,12 +2,12 @@
 """End-to-End AI Coding Agent Example Client for wayland-computer-use-mcp.
 
 Simulates an AI coding agent connecting to the FastMCP server over stdio,
-discovering the 24 exposed tools, and driving examples/test_gui_app.py:
-1. Tool discovery (24 tools).
-2. App lifecycle: launch_app (returns initial tree) + list_managed_apps.
+discovering the 18 default exposed tools, and driving examples/test_gui_app.py:
+1. Tool discovery (18 default tools).
+2. Session check & lifecycle: get_session_status, launch_app, list_managed_apps.
 3. Semantic tree inspection (inspect_ui_tree) & Tree-First interaction (interact_with_node).
 4. Atomic multi-step interaction (batch_actions).
-5. Coordinated mouse interactions (drag, scroll) and keyboard shortcuts.
+5. Coordinated mouse interactions (mouse scroll/drag) and keyboard shortcuts (keyboard).
 6. Security boundary enforcement (prohibition of Super/Meta shortcuts).
 7. Optional screenshot capture & log retrieval (get_app_logs).
 8. Safe application termination (terminate_app).
@@ -41,9 +41,8 @@ async def run_agent_test() -> None:
     print("[Agent Harness] Initializing connection to wayland-computer-use-mcp...")
     server_env = dict(
         os.environ,
-        WAYLAND_MCP_DISPLAY_MODE="live",
+        WAYLAND_MCP_DISPLAY_MODE="virtual",
         WAYLAND_MCP_ACCESS_MODE="window",
-        WAYLAND_MCP_ACTION_DELAY="0.3",
         WAYLAND_MCP_SAVE_FRAMES_DIR=str(artifact_dir),
     )
     server_params = StdioServerParameters(
@@ -67,7 +66,8 @@ async def run_agent_test() -> None:
             assert "inspect_ui_tree" in tool_names
             assert "interact_with_node" in tool_names
             assert "batch_actions" in tool_names
-            assert "key_combination" in tool_names
+            assert "mouse" in tool_names
+            assert "keyboard" in tool_names
 
             # 2. Launch Test App
             print_step("Launch Target GUI App via launch_app")
@@ -117,7 +117,9 @@ async def run_agent_test() -> None:
 
                 # 6. Scroll & Capture Frame
                 print_step("Scroll & Capture Window Frame")
-                scroll_res = await session.call_tool("scroll", {"dx": 0, "dy": -40, "pid": pid})
+                scroll_res = await session.call_tool(
+                    "mouse", {"action": "scroll", "dx": 0, "dy": -40, "pid": pid}
+                )
                 print(f"Scroll result: {scroll_res.content[0].text}")
                 await session.call_tool("capture_window_frame", {"save_artifact": True, "pid": pid})
                 print(f"Captured and saved frame to {artifact_dir}")
@@ -125,7 +127,7 @@ async def run_agent_test() -> None:
                 # 7. Security Boundary Verification
                 print_step("Verify Security: Super/Meta Shortcut Prohibition")
                 res = await session.call_tool(
-                    "key_combination", {"keys": ["super", "d"], "pid": pid}
+                    "keyboard", {"action": "keys", "keys": ["super", "d"], "pid": pid}
                 )
                 assert res.isError or any(
                     "prohibited" in getattr(c, "text", "").lower()

@@ -4,10 +4,24 @@ from __future__ import annotations
 
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
 SessionMode = Literal["blackbox", "passthrough", "mock"]
+
+
+@dataclass
+class WindowSessionState:
+    """Mutable per-PID window geometry, offset, and title state."""
+
+    pid: int
+    title: str | None = None
+    offset_x: int = 0
+    offset_y: int = 0
+    bounds: tuple[int, int] = (1920, 1080)
+    last_frame: Any = None
+    last_position: tuple[int, int] | None = None
+    last_dimensions: tuple[int, int] | None = field(default=None)
 
 
 @dataclass(frozen=True)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -37,12 +37,21 @@ def _dispatch_tracked_input(
     with_delta: bool = True,
 ) -> InteractionResult:
     effective_pid = _sync_target_pid(pid)
-    delta_pid = effective_pid if (with_delta and effective_pid > 0) else 0
+    delta_pid = (
+        effective_pid
+        if (with_delta and effective_pid > 0 and not global_portal_session.is_mock)
+        else 0
+    )
     res = wrap_with_delta(delta_pid, fn, action_name=action_name, target=target)
-    return check_process_health_and_enrich(global_portal_session.target_pid, res)
+    return check_process_health_and_enrich(effective_pid, res)
 
 
-def click(x: int, y: int, button: str = "left", pid: int | None = None) -> InteractionResult:
+def click(
+    x: int,
+    y: int,
+    button: Literal["left", "right", "middle"] = "left",
+    pid: int | None = None,
+) -> InteractionResult:
     """Dispatches a mouse click clamped within the active window boundaries."""
     return _dispatch_tracked_input(
         pid,
@@ -52,7 +61,12 @@ def click(x: int, y: int, button: str = "left", pid: int | None = None) -> Inter
     )
 
 
-def double_click(x: int, y: int, button: str = "left", pid: int | None = None) -> InteractionResult:
+def double_click(
+    x: int,
+    y: int,
+    button: Literal["left", "right", "middle"] = "left",
+    pid: int | None = None,
+) -> InteractionResult:
     """Dispatches a double-click within the active window boundaries."""
     return _dispatch_tracked_input(
         pid,
@@ -131,22 +145,79 @@ def key_combination(keys: list[str], pid: int | None = None) -> InteractionResul
     )
 
 
+def mouse(
+    action: Literal["click", "double_click", "right_click", "hover", "drag", "scroll"],
+    x: int | None = None,
+    y: int | None = None,
+    end_x: int | None = None,
+    end_y: int | None = None,
+    dx: int = 0,
+    dy: int = 0,
+    button: Literal["left", "right", "middle"] = "left",
+    duration_ms: int = 500,
+    pid: int | None = None,
+) -> InteractionResult:
+    """Level 2 coordinate mouse fallback (prefer interact_with_node when AT-SPI is available).
+
+    Actions:
+    - 'click' | 'double_click' | 'right_click': requires (x, y).
+    - 'hover': requires (x, y); optional duration_ms.
+    - 'drag': requires (x, y) start and (end_x, end_y) target.
+    - 'scroll': uses dx / dy discrete wheel deltas.
+    """
+    act = action.strip().lower()
+    if act in ("click", "double_click", "right_click", "hover"):
+        if x is None or y is None:
+            raise ValueError(f"Mouse action '{act}' requires 'x' and 'y' coordinates.")
+        if act == "click":
+            return click(x, y, button=button, pid=pid)
+        if act == "double_click":
+            return double_click(x, y, button=button, pid=pid)
+        if act == "right_click":
+            return right_click(x, y, pid=pid)
+        return hover(x, y, duration_ms=duration_ms, pid=pid)
+    if act == "drag":
+        if None in (x, y, end_x, end_y):
+            raise ValueError("Mouse action 'drag' requires 'x', 'y', 'end_x', and 'end_y'.")
+        return drag(int(x), int(y), int(end_x), int(end_y), pid=pid)  # type: ignore[arg-type]
+    if act == "scroll":
+        return scroll(dx, dy, pid=pid)
+    raise ValueError(f"Unknown mouse action '{action}'.")
+
+
+def keyboard(
+    action: Literal["type", "keys"],
+    text: str | None = None,
+    keys: list[str] | None = None,
+    x: int | None = None,
+    y: int | None = None,
+    pid: int | None = None,
+) -> InteractionResult:
+    """Level 2 keyboard fallback (prefer interact_with_node for named inputs).
+
+    Actions:
+    - 'type': requires ``text`` (optionally clicks ``(x, y)`` first to focus).
+    - 'keys': requires non-empty ``keys`` list (e.g. ``['ctrl', 's']``).
+    """
+    act = action.strip().lower()
+    if act == "type":
+        if text is None:
+            raise ValueError("Keyboard action 'type' requires 'text'.")
+        return type_text(text, x=x, y=y, pid=pid)
+    if act == "keys":
+        if not keys:
+            raise ValueError("Keyboard action 'keys' requires a non-empty 'keys' list.")
+        return key_combination(keys, pid=pid)
+    raise ValueError(f"Unknown keyboard action '{action}'. Must be 'type' or 'keys'.")
+
+
 def register_input_tools(mcp: FastMCP) -> None:
-    """Registers coordinate mouse and keyboard injection tools onto FastMCP."""
+    """Registers consolidated mouse and keyboard fallback tools onto FastMCP."""
     input_ann = ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=False,
         idempotentHint=False,
         openWorldHint=False,
     )
-    for fn in (
-        click,
-        double_click,
-        right_click,
-        hover,
-        drag,
-        scroll,
-        type_text,
-        key_combination,
-    ):
-        mcp.tool(annotations=input_ann)(fn)
+    mcp.tool(annotations=input_ann)(mouse)
+    mcp.tool(annotations=input_ann)(keyboard)

@@ -12,7 +12,10 @@ from wayland_computer_use_mcp.blackbox.adapters import (
     BlackboxCompositorAdapter,
     select_blackbox_adapter,
 )
-from wayland_computer_use_mcp.config import DEFAULT_VIRTUAL_CMD, get_config
+from wayland_computer_use_mcp.config import (
+    DEFAULT_VIRTUAL_CMD,
+    get_config,
+)
 from wayland_computer_use_mcp.core.context import InputSink, SessionContext
 
 if TYPE_CHECKING:
@@ -89,19 +92,22 @@ class BlackboxDriver:
 
                 with _lock:
                     meta = _proc_metadata.get(pid)
-                if meta and meta.get("target"):
-                    app_hint = os.path.splitext(os.path.basename(str(meta["target"])))[0]
+                target_val = (meta.get("target_script") or meta.get("target")) if meta else None
+                if target_val:
+                    app_hint = os.path.splitext(os.path.basename(str(target_val)))[0]
             except Exception:
                 pass
             if not resolved_title:
                 try:
-                    from wayland_computer_use_mcp.a11y import get_application_tree
+                    from wayland_computer_use_mcp.a11y import (
+                        extract_active_window_node,
+                        get_application_tree,
+                    )
 
                     tree = get_application_tree(pid)
-                    for child in tree.get("children", []):
-                        if child.get("role") in ("window", "frame") and child.get("name"):
-                            resolved_title = str(child["name"])
-                            break
+                    win = extract_active_window_node(tree)
+                    if win and win.get("name"):
+                        resolved_title = str(win["name"])
                 except Exception:
                     pass
         return resolved_title, app_hint

@@ -123,6 +123,16 @@ def capture_native_desktop_frame() -> Image.Image | None:
     if cfg.mock_mode or not has_display:
         return None
 
+    # Inside an isolated blackbox sandbox, prefer pure-Python wlr screencopy over host binaries
+    if ctx and ctx.is_isolated:
+        sock_path = ctx.wayland_socket_path()
+        if sock_path:
+            from wayland_computer_use_mcp.blackbox.wlr_wire import capture_wlr_screencopy
+
+            wlr_img = capture_wlr_screencopy(sock_path)
+            if wlr_img is not None:
+                return wlr_img
+
     cmd_template: list[str] | None = None
     if shutil.which("spectacle"):
         cmd_template = ["spectacle", "-b", "-n", "-o"]

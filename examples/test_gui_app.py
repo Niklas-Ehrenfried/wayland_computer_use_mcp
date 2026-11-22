@@ -87,7 +87,7 @@ if HAS_GTK4:
         def __init__(self, **kwargs: Any) -> None:
             super().__init__(**kwargs)
             self.set_title("Wayland MCP Test Rig")
-            self.set_default_size(720, 640)
+            self.set_default_size(720, 740)
             self.click_count = 0
 
             toolbar_view = Adw.ToolbarView()
@@ -202,6 +202,41 @@ if HAS_GTK4:
             self.slider_status = Gtk.Label(label="Slider Value: 25.0", xalign=0.0)
             self.slider_status.add_css_class("dim-label")
             vbox.append(self.slider_status)
+
+            switch_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            switch_row.append(Gtk.Label(label="Auto-Save Mode:", xalign=0.0))
+            self.toggle_switch = Gtk.Switch()
+            self.toggle_switch.update_property([Gtk.AccessibleProperty.LABEL], ["Auto-Save Mode"])
+            self.toggle_switch.connect("notify::active", self.on_switch_toggled)
+            switch_row.append(self.toggle_switch)
+            self.switch_status = Gtk.Label(label="Auto-Save: Off", xalign=0.0)
+            self.switch_status.add_css_class("dim-label")
+            switch_row.append(self.switch_status)
+            vbox.append(switch_row)
+
+            spin_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            spin_row.append(Gtk.Label(label="Retry Count:", xalign=0.0))
+            self.spin = Gtk.SpinButton.new_with_range(0, 100, 1)
+            self.spin.set_value(10)
+            self.spin.update_property([Gtk.AccessibleProperty.LABEL], ["Retry Count"])
+            self.spin.connect("value-changed", self.on_spin_changed)
+            spin_row.append(self.spin)
+            self.spin_status = Gtk.Label(label="Spin Value: 10", xalign=0.0)
+            self.spin_status.add_css_class("dim-label")
+            spin_row.append(self.spin_status)
+            vbox.append(spin_row)
+
+            action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            self.btn_disabled = Gtk.Button(label="Disabled Action")
+            self.btn_disabled.set_sensitive(False)
+            action_row.append(self.btn_disabled)
+            self.btn_modal = Gtk.Button(label="Open Modal Dialog")
+            self.btn_modal.connect("clicked", self.on_open_modal_dialog)
+            action_row.append(self.btn_modal)
+            self.dialog_status = Gtk.Label(label="Dialog Result: None", xalign=0.0)
+            self.dialog_status.add_css_class("dim-label")
+            action_row.append(self.dialog_status)
+            vbox.append(action_row)
             return vbox
 
         def _build_navigation_tab(self) -> Gtk.Widget:
@@ -361,6 +396,47 @@ if HAS_GTK4:
             self.slider_status.set_text(f"Slider Value: {val:.1f}")
             self._log_event(f"Slider dragged: {val:.1f}")
 
+        def on_switch_toggled(self, widget: Gtk.Switch, param: Any) -> None:
+            state = "On" if widget.get_active() else "Off"
+            self.switch_status.set_text(f"Auto-Save: {state}")
+            self._log_event(f"Switch toggled: {state}")
+
+        def on_spin_changed(self, widget: Gtk.SpinButton) -> None:
+            val = int(round(widget.get_value()))
+            self.spin_status.set_text(f"Spin Value: {val}")
+            self._log_event(f"SpinButton updated: {val}")
+
+        def on_open_modal_dialog(self, widget: Gtk.Button) -> None:
+            dialog = Gtk.Window(
+                title="Confirm Action",
+                transient_for=self,
+                modal=True,
+                default_width=320,
+                default_height=150,
+            )
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+            box.set_margin_start(16)
+            box.set_margin_end(16)
+            box.set_margin_top(16)
+            box.set_margin_bottom(16)
+            box.append(Gtk.Label(label="Proceed with operation?", xalign=0.0))
+
+            btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            btn_confirm = Gtk.Button(label="Confirm Dialog")
+            btn_confirm.connect("clicked", lambda b: self._close_modal_dialog(dialog, "Confirmed"))
+            btn_cancel = Gtk.Button(label="Cancel Dialog")
+            btn_cancel.connect("clicked", lambda b: self._close_modal_dialog(dialog, "Cancelled"))
+            btn_box.append(btn_confirm)
+            btn_box.append(btn_cancel)
+            box.append(btn_box)
+            dialog.set_child(box)
+            dialog.present()
+
+        def _close_modal_dialog(self, dialog: Gtk.Window, outcome: str) -> None:
+            self.dialog_status.set_text(f"Dialog Result: {outcome}")
+            self._log_event(f"Modal dialog outcome: {outcome}")
+            dialog.destroy()
+
 
 else:
     # --- GTK 3 Native Fallback ---
@@ -369,7 +445,7 @@ else:
 
         def __init__(self) -> None:
             super().__init__(title="Wayland MCP Test Rig")
-            self.set_default_size(720, 640)
+            self.set_default_size(720, 740)
             self.click_count = 0
 
             main_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -419,6 +495,38 @@ else:
 
             self.slider_status = Gtk.Label(label="Slider Value: 25.0", xalign=0.0)
             t1.pack_start(self.slider_status, False, False, 0)
+
+            switch_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            switch_row.pack_start(Gtk.Label(label="Auto-Save Mode:", xalign=0.0), False, False, 0)
+            self.toggle_switch = Gtk.Switch()
+            self.toggle_switch.get_accessible().set_name("Auto-Save Mode")
+            self.toggle_switch.connect("notify::active", self.on_switch_toggled)
+            switch_row.pack_start(self.toggle_switch, False, False, 0)
+            self.switch_status = Gtk.Label(label="Auto-Save: Off", xalign=0.0)
+            switch_row.pack_start(self.switch_status, False, False, 0)
+            t1.pack_start(switch_row, False, False, 0)
+
+            spin_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            spin_row.pack_start(Gtk.Label(label="Retry Count:", xalign=0.0), False, False, 0)
+            self.spin = Gtk.SpinButton.new_with_range(0, 100, 1)
+            self.spin.set_value(10)
+            self.spin.get_accessible().set_name("Retry Count")
+            self.spin.connect("value-changed", self.on_spin_changed)
+            spin_row.pack_start(self.spin, False, False, 0)
+            self.spin_status = Gtk.Label(label="Spin Value: 10", xalign=0.0)
+            spin_row.pack_start(self.spin_status, False, False, 0)
+            t1.pack_start(spin_row, False, False, 0)
+
+            action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            self.btn_disabled = Gtk.Button(label="Disabled Action")
+            self.btn_disabled.set_sensitive(False)
+            action_row.pack_start(self.btn_disabled, False, False, 0)
+            self.btn_modal = Gtk.Button(label="Open Modal Dialog")
+            self.btn_modal.connect("clicked", self.on_open_modal_dialog)
+            action_row.pack_start(self.btn_modal, False, False, 0)
+            self.dialog_status = Gtk.Label(label="Dialog Result: None", xalign=0.0)
+            action_row.pack_start(self.dialog_status, False, False, 0)
+            t1.pack_start(action_row, False, False, 0)
 
             self.notebook.append_page(t1, Gtk.Label(label="Controls & Inputs"))
 
@@ -526,6 +634,44 @@ else:
             val = widget.get_value()
             self.slider_status.set_text(f"Slider Value: {val:.1f}")
             self._log_event(f"Slider dragged: {val:.1f}")
+
+        def on_switch_toggled(self, widget: Gtk.Switch, param: Any) -> None:
+            state = "On" if widget.get_active() else "Off"
+            self.switch_status.set_text(f"Auto-Save: {state}")
+            self._log_event(f"Switch toggled: {state}")
+
+        def on_spin_changed(self, widget: Gtk.SpinButton) -> None:
+            val = int(round(widget.get_value()))
+            self.spin_status.set_text(f"Spin Value: {val}")
+            self._log_event(f"SpinButton updated: {val}")
+
+        def on_open_modal_dialog(self, widget: Gtk.Button) -> None:
+            dialog = Gtk.Window(
+                title="Confirm Action",
+                transient_for=self,
+                modal=True,
+                default_width=320,
+                default_height=150,
+            )
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+            box.set_border_width(16)
+            box.pack_start(Gtk.Label(label="Proceed with operation?", xalign=0.0), False, False, 0)
+
+            btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            btn_confirm = Gtk.Button(label="Confirm Dialog")
+            btn_confirm.connect("clicked", lambda b: self._close_modal_dialog(dialog, "Confirmed"))
+            btn_cancel = Gtk.Button(label="Cancel Dialog")
+            btn_cancel.connect("clicked", lambda b: self._close_modal_dialog(dialog, "Cancelled"))
+            btn_box.pack_start(btn_confirm, False, False, 0)
+            btn_box.pack_start(btn_cancel, False, False, 0)
+            box.pack_start(btn_box, False, False, 0)
+            dialog.add(box)
+            dialog.show_all()
+
+        def _close_modal_dialog(self, dialog: Gtk.Window, outcome: str) -> None:
+            self.dialog_status.set_text(f"Dialog Result: {outcome}")
+            self._log_event(f"Modal dialog outcome: {outcome}")
+            dialog.destroy()
 
 
 def main() -> None:

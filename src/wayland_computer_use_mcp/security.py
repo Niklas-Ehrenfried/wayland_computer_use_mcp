@@ -15,7 +15,7 @@ import threading
 import time
 from pathlib import Path
 
-from wayland_computer_use_mcp.config import get_config
+from wayland_computer_use_mcp.config import get_config, resolve_effective_display_mode
 
 
 class CoordinateClamper:
@@ -276,13 +276,18 @@ class SystemShortcutFilter:
                     "Super/Meta/Win keys are prohibited to prevent escaping window isolation."
                 )
 
-        # 2. Prohibit Ctrl+Alt combinations
+        # 2. Prohibit Ctrl+Alt combinations and Alt+F4
         has_ctrl = any(k in ("ctrl", "control", "leftctrl", "rightctrl") for k in normalized)
         has_alt = any(k in ("alt", "leftalt", "rightalt", "altgr") for k in normalized)
         if has_ctrl and has_alt:
             raise PermissionError(
                 f"Shortcut '{'+'.join(keys)}' is blocked: "
                 "Ctrl+Alt combinations are prohibited to prevent desktop/VT switching."
+            )
+        if has_alt and "f4" in normalized:
+            raise PermissionError(
+                f"Shortcut '{'+'.join(keys)}' is blocked: "
+                "Alt+F4 is prohibited to prevent closing unmanaged desktop windows."
             )
 
         # 3. Prohibit dangerous hardware/system keys
@@ -385,8 +390,8 @@ class UserPreemptionManager:
 
     def wait_for_user_idle(self, max_wait: float | None = None) -> None:
         """Waits until user physical interaction settles and cooldown expires."""
-        cfg = get_config()
-        if cfg.display_mode == "virtual":
+        effective_mode, _, _ = resolve_effective_display_mode(get_config())
+        if effective_mode == "virtual":
             return
 
         timeout = max_wait if max_wait is not None else self.max_wait_seconds

@@ -70,6 +70,29 @@ class AtspiEventListener:
             self._events.append(event_record)
             self._last_event_time = now
 
+        # Record live focus switches away from the managed app so UserPreemptionManager triggers
+        if interface.startswith("org.a11y.atspi.Event.Window") and member == "Activate":
+            try:
+                cfg = get_config()
+                if not cfg.mock_mode and cfg.display_mode == "live":
+                    from wayland_computer_use_mcp.a11y.tree import _node_cache
+                    from wayland_computer_use_mcp.core.context import get_active_context
+                    from wayland_computer_use_mcp.portal import global_portal_session
+                    from wayland_computer_use_mcp.security import global_preemption_manager
+
+                    ctx = get_active_context()
+                    target_pid = global_portal_session.target_pid
+                    if target_pid and not (ctx and ctx.is_isolated):
+                        target_buses = {
+                            n.get("bus_name")
+                            for n in _node_cache.get(target_pid, {}).values()
+                            if n.get("bus_name")
+                        }
+                        if target_buses and msg.sender not in target_buses:
+                            global_preemption_manager.record_user_activity()
+            except Exception:
+                pass
+
     async def _async_start(self) -> None:
         """Async worker connecting to the AT-SPI bus and registering match rules."""
         addr = await resolve_atspi_bus_address()

@@ -10,11 +10,15 @@ from typing import Any
 
 from PIL import Image
 
-from wayland_computer_use_mcp.artifacts import get_artifacts_dir
+from wayland_computer_use_mcp.artifacts import get_artifacts_dir, prune_artifacts
 from wayland_computer_use_mcp.blackbox.driver import BlackboxDriver
 from wayland_computer_use_mcp.compat.host_driver import HostPassthroughDriver
-from wayland_computer_use_mcp.config import get_config
-from wayland_computer_use_mcp.core.context import get_active_context, set_active_context
+from wayland_computer_use_mcp.config import get_config, resolve_effective_display_mode
+from wayland_computer_use_mcp.core.context import (
+    WindowSessionState,
+    get_active_context,
+    set_active_context,
+)
 from wayland_computer_use_mcp.core.driver import SessionDriver
 from wayland_computer_use_mcp.core.mock_driver import MockSessionDriver
 from wayland_computer_use_mcp.portal.input import InputDispatcher
@@ -34,7 +38,8 @@ class PortalSession:
 
     def __init__(self) -> None:
         self.active_app_id: str = "default"
-        self.target_pid: int | None = None
+        self._target_pid: int | None = None
+        self._pid_states: dict[int, WindowSessionState] = {}
         self.target_title: str | None = None
         self.window_offset_x: int = 0
         self.window_offset_y: int = 0
@@ -57,12 +62,82 @@ class PortalSession:
             get_offsets_fn=lambda: (self.window_offset_x, self.window_offset_y),
         )
 
+    @property
+    def target_pid(self) -> int | None:
+        return self._target_pid
+
+    @target_pid.setter
+    def target_pid(self, value: int | None) -> None:
+        if value == self._target_pid:
+            return
+        if self._target_pid is not None:
+            prev = self._pid_states.get(self._target_pid) or WindowSessionState(
+                pid=self._target_pid
+            )
+            prev.title = self.target_title
+            prev.offset_x = self.window_offset_x
+            prev.offset_y = self.window_offset_y
+            prev.bounds = global_clamper.dimensions
+            prev.last_frame = self._last_frame
+            prev.last_position = global_geometry_detector.last_position
+            prev.last_dimensions = global_geometry_detector.last_dimensions
+            self._pid_states[self._target_pid] = prev
+
+        self._target_pid = value
+        if value is not None:
+            nxt = self._pid_states.get(value)
+            if nxt is None:
+                nxt = WindowSessionState(pid=value)
+                self._pid_states[value] = nxt
+            self.target_title = nxt.title
+            self.window_offset_x = nxt.offset_x
+            self.window_offset_y = nxt.offset_y
+            self._last_frame = nxt.last_frame
+            global_clamper.set_bounds(*nxt.bounds)
+            global_geometry_detector.last_position = nxt.last_position
+            global_geometry_detector.last_dimensions = nxt.last_dimensions
+        else:
+            self.target_title = None
+            self.window_offset_x = 0
+            self.window_offset_y = 0
+            self._last_frame = None
+            global_geometry_detector.last_position = None
+            global_geometry_detector.last_dimensions = None
+
+    def get_pid_state(self, pid: int) -> WindowSessionState | None:
+        """Returns cached per-PID window geometry/offset state, syncing active PID first."""
+        if pid == self._target_pid and pid is not None:
+            state = self._pid_states.get(pid) or WindowSessionState(pid=pid)
+            state.title = self.target_title
+            state.offset_x = self.window_offset_x
+            state.offset_y = self.window_offset_y
+            state.bounds = global_clamper.dimensions
+            state.last_frame = self._last_frame
+            state.last_position = global_geometry_detector.last_position
+            state.last_dimensions = global_geometry_detector.last_dimensions
+            self._pid_states[pid] = state
+            return state
+        return self._pid_states.get(pid)
+
+    def clear_pid_state(self, pid: int) -> None:
+        """Discards stored window state for an exited/terminated PID."""
+        self._pid_states.pop(pid, None)
+        if self._target_pid == pid:
+            self._target_pid = None
+            self.target_title = None
+            self.window_offset_x = 0
+            self.window_offset_y = 0
+            self._last_frame = None
+            global_geometry_detector.last_position = None
+            global_geometry_detector.last_dimensions = None
+
     def active_driver(self) -> SessionDriver:
         """Selects the active driver: Mock (test/no-display), Blackbox (primary), or Host."""
         cfg = get_config()
         if cfg.mock_mode:
             return self._mock
-        if cfg.display_mode == "virtual" or self._blackbox.is_active():
+        effective_mode, _, _ = resolve_effective_display_mode(cfg)
+        if effective_mode == "virtual" or self._blackbox.is_active():
             return self._blackbox
         ctx = get_active_context()
         has_display = bool((ctx and ctx.wayland_display) or os.environ.get("WAYLAND_DISPLAY"))
@@ -142,9 +217,10 @@ class PortalSession:
     def _ensure_host_portal_ready(self) -> None:
         """Promotes lazy host passthrough to portal control on visual/physical use."""
         driver = self.active_driver()
+        _, _, effective_lazy = resolve_effective_display_mode(get_config())
         if (
             driver is self._host
-            and get_config().lazy_portal
+            and effective_lazy
             and self._host.rd_client.pipewire_node_id is None
         ):
             self._host.ensure_dialogs_above()
@@ -157,13 +233,16 @@ class PortalSession:
         if not self.target_pid:
             return None
         try:
-            from wayland_computer_use_mcp.a11y import get_application_tree
+            from wayland_computer_use_mcp.a11y import (
+                extract_active_window_node,
+                get_application_tree,
+            )
 
             tree = get_application_tree(self.target_pid)
-            for child in tree.get("children", []):
-                if child.get("role") in ("window", "frame") and child.get("name"):
-                    self.target_title = child.get("name")
-                    return self.target_title
+            win = extract_active_window_node(tree)
+            if win and win.get("name"):
+                self.target_title = str(win["name"])
+                return self.target_title
         except Exception:
             pass
         return None
@@ -171,21 +250,19 @@ class PortalSession:
     @staticmethod
     def _extract_tree_window_bounds(tree: dict[str, Any]) -> tuple[int, int, int, int] | None:
         """Extracts non-zero [x, y, w, h] window bounds from AT-SPI application tree."""
+        from wayland_computer_use_mcp.a11y import extract_active_window_node
 
         def _valid(b: Any) -> tuple[int, int, int, int] | None:
             if isinstance(b, list) and len(b) == 4 and b[2] > 0 and b[3] > 0:
                 return int(b[0]), int(b[1]), int(b[2]), int(b[3])
             return None
 
-        root_bounds = _valid(tree.get("bounds"))
-        if root_bounds:
-            return root_bounds
-        for child in tree.get("children", []):
-            if child.get("role") in ("window", "frame"):
-                c_bounds = _valid(child.get("bounds"))
-                if c_bounds:
-                    return c_bounds
-        return None
+        win = extract_active_window_node(tree)
+        if win:
+            w_bounds = _valid(win.get("bounds"))
+            if w_bounds:
+                return w_bounds
+        return _valid(tree.get("bounds"))
 
     def _resolve_target_geometry(self) -> tuple[int, int, int, int] | None:
         """Resolves active target window geometry via driver compositor or AT-SPI fallback."""
@@ -251,6 +328,24 @@ class PortalSession:
             result_frame = crop_element(frame, *crop_box)
         elif self.target_pid and geom:
             wx, wy, ww, wh = geom
+            scale = 1.0
+            try:
+                from wayland_computer_use_mcp.compositors import get_display_scale
+
+                scale = get_display_scale(wx, wy)
+            except Exception:
+                scale = 1.0
+            if scale > 1.0:
+                sx = int(round(wx * scale))
+                sy = int(round(wy * scale))
+                sw = int(round(ww * scale))
+                sh = int(round(wh * scale))
+                if (
+                    (ww < frame.width or wh < frame.height)
+                    and sx + sw <= frame.width + 2
+                    and sy + sh <= frame.height + 2
+                ):
+                    wx, wy, ww, wh = sx, sy, sw, sh
             result_frame = crop_element(frame, wx, wy, ww, wh)
         else:
             result_frame = frame
@@ -260,6 +355,7 @@ class PortalSession:
                 frame_path = get_artifacts_dir("screenshots") / filename
                 result_frame.save(frame_path)
                 self.last_saved_frame_path = str(frame_path)
+                prune_artifacts("screenshots")
             except Exception as exc:
                 logger.debug("Failed to save frame: %s", exc)
         return result_frame
@@ -287,10 +383,19 @@ class PortalSession:
             )
         geom = self._resolve_target_geometry()
         if not geom:
-            raise RuntimeError(
-                f"Target application window (PID {self.target_pid}) "
-                "is not open, visible, or mapped. Action blocked."
-            )
+            if self.active_driver().is_isolated():
+                if self._last_frame is not None:
+                    fw, fh = self._last_frame.size
+                else:
+                    fw, fh = global_clamper.dimensions
+                if fw <= 0 or fh <= 0:
+                    fw, fh = 1280, 800
+                geom = (0, 0, fw, fh)
+            else:
+                raise RuntimeError(
+                    f"Target application window (PID {self.target_pid}) "
+                    "is not open, visible, or mapped. Action blocked."
+                )
 
         wx, wy, ww, wh = geom
         global_geometry_detector.validate_stability(
@@ -342,12 +447,14 @@ class PortalSession:
             pass
         self._blackbox.close()
         self._mock.close()
+        self._pid_states.clear()
         set_active_context(None)
         self._initialized = False
 
     def close_virtual_if_idle(self) -> bool:
         """Tears down the isolated virtual window when no managed apps remain."""
-        if get_config().display_mode != "virtual" and not self._blackbox.is_active():
+        effective_mode, _, _ = resolve_effective_display_mode(get_config())
+        if effective_mode != "virtual" and not self._blackbox.is_active():
             return False
         self._stop_session_resources()
         return True

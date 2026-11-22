@@ -45,16 +45,25 @@ This document tracks completed milestones and the active **Dual-Mode Roadmap** f
 
 ---
 
-## 2. Active Roadmap: Dual-Mode Architecture (v0.2.0)
+## 2. Completed in v0.2.0 – v0.3.0 & Next Milestones
 
-### Track A: Primary Mode — Full Playwright-Style Isolated Sandbox Session
-Goal: Make `--virtual-window` / `--virtual` self-contained with zero portal prompts and full Level 2 + visual support on every compositor (KDE, GNOME, Sway, Hyprland).
-- [ ] **Isolated Private D-Bus & Runtime Environment per Virtual Session**:
-  - Automatically provision a private `XDG_RUNTIME_DIR` + `dbus-run-session` + private `at-spi` bus alongside `--virtual-window` / `--virtual` (building on `tests/test_virtual_session.py`) so host desktop windows, clipboard, and AT-SPI bus stay 100% shielded.
-- [ ] **Auto-Crop Virtual Frame Captures**:
-  - Query target window bounds `[wx, wy, ww, wh]` inside the virtual/nested compositor and automatically crop raw 1280x800 canvas captures to exact `(ww, wh)` dimensions when `window_only` is active.
-- [ ] **Nested Level 2 Input & Visual Bridge**:
-  - Note: Plain nested `weston` isolates Level 1 AT-SPI windows cleanly across all DEs, while inner `RemoteDesktop`/EIS input portals require either an isolated portal backend (e.g., `kwin_wayland` + `xdg-desktop-portal-kde` on KDE) or direct compositor protocol input (e.g., `wlroots` virtual-pointer/virtual-keyboard protocols / XWayland fallback inside nested `sway` or `weston`). Implement a compositor-agnostic virtual pointer/keyboard bridge inside nested sessions so clicking/dragging works even for custom canvas widgets inside `weston`/`sway`.
+### Completed in v0.3.0 (Architecture, Stability & Tool Surface Consolidation)
+- [x] **Bulk AT-SPI Fetching (`org.a11y.atspi.Cache.GetItems`)**: Bulk tree snapshots in `a11y/client.py` with container completeness validation (`declared_children`) and parallel recursive traversal fallback.
+- [x] **Stable Locators & Stale-ID Protection (`a11y/tree.py`, `a11y/actions.py`, `presets.py`)**: Per-PID `tree_generation`, cached-node identity verification/rebinding, modal dialog prioritization (`extract_active_window_node`), and auto-normalization of positional IDs into `target` + `role` on `preset_workflow(action="save", ...)`.
+- [x] **Per-PID Window Session State (`core/context.py`, `portal/session.py`)**: Isolated `WindowSessionState` saved/restored across multi-app PID switching and cleaned up on `terminate_app`.
+- [x] **18-Tool Consolidated Surface (`tools/input_tools.py`)**: Consolidated the 8 physical input tools into `mouse` and `keyboard` on FastMCP (saving tool-schema tokens) while keeping Python helpers exported.
+- [x] **Default `"auto"` Playwright-Style Mode (`config.py`)**: Automatically isolates in Blackbox mode (`virtual-window` when `WAYLAND_DISPLAY` is set, headless otherwise) when compositor + `dbus-daemon` are available, falling back cleanly to lazy `"live"` passthrough.
+- [x] **Structured Recovery Hints & Headless `labwc` CI (`.github/workflows/ci.yml`)**: `exited_early` startup diagnostics in `launch_app`, `error_code`/`recovery_hint` in `batch_actions`, missing-target closest-match hint in `capture_window_frame`, and live headless `labwc` integration job in GitHub Actions CI.
+
+### Track A: Primary Mode — Full Playwright-Style Isolated Sandbox Session (`blackbox/`)
+- [x] **Isolated Private D-Bus & Runtime Environment per Virtual Session (`portal/virtual.py`, `blackbox/`)**:
+  - Automatically provisions private `XDG_RUNTIME_DIR` + `dbus-daemon` + isolated AT-SPI bus + FUSE/process cleanup on teardown.
+- [x] **Auto-Crop Virtual Frame Captures & HiDPI Scale Compensation (`portal/session.py`)**:
+  - Queries window bounds `[wx, wy, ww, wh]` inside the virtual/nested compositor and scales captures on fractional HiDPI outputs.
+- [x] **Nested Level 2 Input & Visual Bridge (`blackbox/wlr_wire.py`, `blackbox/adapters.py`)**:
+  - Direct `kwin_eis` on `kwin_wayland` plus pure-Python `zwlr_screencopy_manager_v1` + `zwlr_virtual_pointer_v1` / `zwp_virtual_keyboard_v1` + `zwlr_foreign_toplevel_management_v1` on `labwc`/`sway`.
+- [x] **Multi-Stack App Launching (`process.py`)**:
+  - `$PATH` resolution via `shutil.which()` + automatic `ACCESSIBILITY_ENABLED=1`, `ELECTRON_OZONE_PLATFORM_HINT=auto`, and `--force-renderer-accessibility` / `--ozone-platform=wayland` flags for Electron/Chromium/Tauri/Rust/C++ native apps.
 - [ ] **Floating Companion Viewer / Interactive PiP Controls**:
   - Optional lightweight preview wrapper for headless runs (`WAYLAND_MCP_PREVIEW_WINDOW`) with fullscreen toggle (`F11`) and human "Takeover" button.
 

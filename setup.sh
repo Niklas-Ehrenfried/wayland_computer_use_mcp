@@ -3,33 +3,20 @@
 # Exit immediately if a command exits with a non-zero status
 set -e
 
-echo "🚀 Starting setup for wayland_computer_use_mcp..."
+echo "Starting setup for wayland_computer_use_mcp..."
 
-# 1. Update system package lists
-echo "🔄 Updating package lists..."
-sudo apt update
-
-# 2. Install all system dependencies required to build pycairo and pygobject
-echo "📦 Installing system dependencies (C-libraries & build tools)..."
-sudo apt install -y \
-    pkg-config \
-    libcairo2-dev \
-    gobject-introspection \
-    libgirepository1.0-dev \
-    libgirepository-2.0-dev \
-    gir1.2-girepository-2.0
-
-# 3. Create uv virtual environment if it doesn't exist
-if [ ! -d ".venv" ]; then
-    echo "🌱 Creating virtual environment with uv..."
-    uv sync
-else
-    echo "✅ Virtual environment (.venv) already exists."
+# Optional system runtime tools for virtual-window blackbox and AT-SPI tree inspection
+if command -v apt-get >/dev/null 2>&1; then
+    echo "Installing optional Wayland runtime dependencies (at-spi2-core, dbus, labwc)..."
+    sudo apt-get update
+    sudo apt-get install -y --no-install-recommends \
+        dbus-x11 \
+        at-spi2-core \
+        labwc
 fi
 
-# 4. Install project dependencies in editable mode
-echo "🛠️ Installing Python project dependencies via uv..."
-uv pip install -e .
+echo "Syncing pure-Python core & dev dependencies with uv..."
+uv sync --all-extras --dev
 
-echo "🎉 Setup complete! To activate your environment, run:"
-echo "   source .venv/bin/activate"
+echo "Setup complete! Run the MCP server via:"
+echo "  uv run wayland-computer-use-mcp --virtual-window"

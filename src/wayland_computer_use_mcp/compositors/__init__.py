@@ -115,6 +115,25 @@ def ensure_portal_dialogs_above() -> bool:
         return False
 
 
+async def _get_display_scale_async(x: int = 0, y: int = 0) -> float:
+    backend = await get_compositor_backend()
+    displays = await backend.get_active_displays()
+    for d in displays:
+        if d.x <= x < d.x + d.width and d.y <= y < d.y + d.height:
+            return max(1.0, float(d.scale or 1.0))
+    if displays:
+        return max(1.0, float(displays[0].scale or 1.0))
+    return 1.0
+
+
+def get_display_scale(x: int = 0, y: int = 0) -> float:
+    """Returns the fractional display scale factor for the monitor containing (x, y)."""
+    try:
+        return float(_run_async_sync(_get_display_scale_async, x, y))
+    except Exception:
+        return 1.0
+
+
 __all__ = [
     "CompositorBackend",
     "DisplayInfo",
@@ -127,6 +146,7 @@ __all__ = [
     "activate_and_raise_window",
     "ensure_portal_dialogs_above",
     "get_compositor_backend",
+    "get_display_scale",
     "query_window_geometry",
     "reset_compositor_backend",
     "set_window_state",

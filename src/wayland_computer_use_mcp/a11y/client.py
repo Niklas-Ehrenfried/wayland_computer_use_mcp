@@ -7,17 +7,23 @@ import logging
 import os
 from typing import Any
 
-from dbus_fast import BusType, Message
+from dbus_fast import BusType, Message, MessageType
 from dbus_fast.aio import MessageBus
 
 from wayland_computer_use_mcp._async import PersistentLoop
-from wayland_computer_use_mcp.a11y.constants import CONTAINER_ROLES, IGNORED_ROLES
+from wayland_computer_use_mcp.a11y.constants import (
+    ATSPI_ROLE_ID_MAP,
+    CONTAINER_ROLES,
+    IGNORED_ROLES,
+    INTERACTIVE_ROLES,
+)
 from wayland_computer_use_mcp.a11y.synthetic import build_synthetic_tree
 
 logger = logging.getLogger(__name__)
 
 _cached_bus_address: str | None = None
 _bus_pool: dict[int, MessageBus] = {}
+_dynamic_role_names: dict[int, str] = {}
 _atspi_loop = PersistentLoop(name="AtspiAsyncLoop")
 
 
@@ -161,10 +167,21 @@ class AtspiInspector:
         if pid <= 0 or get_config().mock_mode:
             return build_synthetic_tree(pid)
 
+        def _empty_tree(reason: str) -> dict[str, Any]:
+            return {
+                "role": "application",
+                "name": f"PID-{pid}",
+                "states": [],
+                "bounds": [0, 0, 0, 0],
+                "children": [],
+                "atspi_available": False,
+                "reason": reason,
+            }
+
         connected = await self.connect()
         if not connected or not self.bus:
-            logger.debug("AT-SPI unavailable; falling back to synthetic tree for PID %s", pid)
-            return build_synthetic_tree(pid)
+            logger.debug("AT-SPI unavailable for PID %s", pid)
+            return _empty_tree("AT-SPI bus unavailable")
 
         try:
             root_msg = Message(
@@ -176,7 +193,7 @@ class AtspiInspector:
             reply = await self.bus.call(root_msg)
             if not reply or not reply.body:
                 logger.debug("Empty children from AT-SPI root registry")
-                return build_synthetic_tree(pid)
+                return _empty_tree("Empty AT-SPI registry")
 
             apps = reply.body[0]
             matched_app: tuple[str, str] | None = None
@@ -201,22 +218,274 @@ class AtspiInspector:
                     pass
 
             if not matched_app:
-                logger.debug(
-                    "No accessible AT-SPI application matched PID %s; using synthetic tree", pid
-                )
-                return build_synthetic_tree(pid)
+                logger.debug("No accessible AT-SPI application matched PID %s", pid)
+                return _empty_tree(f"PID {pid} has not exposed an AT-SPI tree yet")
 
+            cached_tree = await self._fetch_tree_from_cache(
+                matched_app[0], matched_app[1], max_depth=max_depth
+            )
+            if cached_tree is not None and (cached_tree.get("children") or max_depth <= 0):
+                return cached_tree
+
+            visited: set[tuple[str, str]] = set()
+            sem = asyncio.Semaphore(16)
             tree = await self._traverse_node(
-                matched_app[0], matched_app[1], current_depth=0, max_depth=max_depth
+                matched_app[0],
+                matched_app[1],
+                current_depth=0,
+                max_depth=max_depth,
+                visited=visited,
+                sem=sem,
             )
             pruned = self._prune_tree(tree)
             return pruned or tree
 
         except Exception as exc:
             logger.debug("Error traversing AT-SPI tree for PID %s: %s", pid, exc)
-            return build_synthetic_tree(pid)
+            return _empty_tree(f"AT-SPI traversal error: {exc}")
         finally:
             await self.close()
+
+    async def _fetch_tree_from_cache(
+        self,
+        bus_name: str,
+        root_path: str,
+        max_depth: int,
+    ) -> dict[str, Any] | None:
+        """Fast path fetching all subtree metadata in 1 D-Bus call via Cache.GetItems."""
+        if not self.bus:
+            return None
+        try:
+            reply = await self.bus.call(
+                Message(
+                    destination=bus_name,
+                    path="/org/a11y/atspi/cache",
+                    interface="org.a11y.atspi.Cache",
+                    member="GetItems",
+                )
+            )
+        except Exception:
+            return None
+
+        if not reply or reply.message_type == MessageType.ERROR or not reply.body:
+            return None
+        items = reply.body[0]
+        if not isinstance(items, (list, tuple)) or not items:
+            return None
+
+        nodes_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+        ifaces_by_key: dict[tuple[str, str], set[str]] = {}
+        declared_children: dict[tuple[str, str], int] = {}
+        children_by_parent: dict[tuple[str, str], list[tuple[int, int, tuple[str, str]]]] = {}
+        unknown_roles: list[tuple[int, str, str]] = []
+
+        for order, item in enumerate(items):
+            if not isinstance(item, (list, tuple)) or len(item) < 10:
+                continue
+            (
+                self_ref,
+                _,
+                parent_ref,
+                idx_in_parent,
+                child_count,
+                ifaces,
+                name,
+                role_id,
+                _,
+                raw_states,
+            ) = item
+            if not isinstance(self_ref, (list, tuple)) or len(self_ref) < 2:
+                continue
+            n_bus, n_path = str(self_ref[0]), str(self_ref[1])
+            key = (n_bus, n_path)
+            rid = int(role_id)
+            role = ATSPI_ROLE_ID_MAP.get(rid) or _dynamic_role_names.get(rid)
+            if role is None:
+                unknown_roles.append((rid, n_bus, n_path))
+                role = "unknown"
+
+            nodes_by_key[key] = {
+                "bus_name": n_bus,
+                "path": n_path,
+                "role": role,
+                "name": str(name or ""),
+                "states": self._decode_states(raw_states),
+                "bounds": [0, 0, 0, 0],
+                "children": [],
+                "index_in_parent": int(idx_in_parent),
+            }
+            ifaces_by_key[key] = {str(i) for i in (ifaces or [])}
+            declared_children[key] = max(0, int(child_count))
+
+            if isinstance(parent_ref, (list, tuple)) and len(parent_ref) >= 2:
+                p_bus, p_path = str(parent_ref[0]), str(parent_ref[1])
+                if p_path and p_path != "/org/a11y/atspi/null":
+                    children_by_parent.setdefault((p_bus, p_path), []).append(
+                        (int(idx_in_parent), order, key)
+                    )
+
+        # Resolve any toolkit-specific custom role IDs once and cache globally
+        seen_rids: set[int] = set()
+        for rid, r_bus, r_path in unknown_roles:
+            if rid in seen_rids or rid in _dynamic_role_names:
+                continue
+            seen_rids.add(rid)
+            try:
+                r_rep = await self.bus.call(
+                    Message(
+                        destination=r_bus,
+                        path=r_path,
+                        interface="org.a11y.atspi.Accessible",
+                        member="GetRoleName",
+                    )
+                )
+                if r_rep and r_rep.message_type != MessageType.ERROR and r_rep.body:
+                    _dynamic_role_names[rid] = str(r_rep.body[0]).lower()
+            except Exception:
+                pass
+        if seen_rids:
+            for key, node in nodes_by_key.items():
+                if node["role"] == "unknown":
+                    for rid, r_bus, r_path in unknown_roles:
+                        if (r_bus, r_path) == key and rid in _dynamic_role_names:
+                            node["role"] = _dynamic_role_names[rid]
+
+        root_key = (bus_name, root_path)
+        if root_key not in nodes_by_key:
+            return None
+
+        visited: set[tuple[str, str]] = set()
+
+        def _assemble(cur_key: tuple[str, str], depth: int) -> tuple[dict[str, Any] | None, bool]:
+            if depth > max_depth or cur_key in visited:
+                return None, False
+            node = nodes_by_key.get(cur_key)
+            if node is None:
+                return None, False
+            visited.add(cur_key)
+            if depth < max_depth:
+                child_entries = sorted(
+                    children_by_parent.get(cur_key, []),
+                    key=lambda x: (x[0], x[1]),
+                )
+                states = node.get("states", [])
+                is_visible = "visible" in states or "showing" in states or not states
+                if is_visible and declared_children.get(cur_key, 0) > len(child_entries):
+                    return None, True
+                for _, _, c_key in child_entries:
+                    child, incomplete = _assemble(c_key, depth + 1)
+                    if incomplete:
+                        return None, True
+                    if child is not None:
+                        node["children"].append(child)
+            return node, False
+
+        raw_tree, incomplete = _assemble(root_key, 0)
+        if raw_tree is None or incomplete:
+            return None
+        pruned = self._prune_tree(raw_tree) or raw_tree
+
+        # Batch Component extents & Value only on surviving pruned nodes
+        need_win_ext: list[dict[str, Any]] = []
+        need_scr_ext: list[dict[str, Any]] = []
+        need_val: list[dict[str, Any]] = []
+
+        def _collect(node: dict[str, Any], depth: int) -> None:
+            key = (str(node.get("bus_name", "")), str(node.get("path", "")))
+            ifaces = ifaces_by_key.get(key, set())
+            role = str(node.get("role", "")).lower()
+            has_comp = "org.a11y.atspi.Component" in ifaces
+            if has_comp and (
+                role in INTERACTIVE_ROLES
+                or role in ("label", "static", "window", "frame", "dialog", "tab panel")
+            ):
+                need_win_ext.append(node)
+            if has_comp and (depth == 0 or role in ("window", "frame", "dialog")):
+                need_scr_ext.append(node)
+            if "org.a11y.atspi.Value" in ifaces and role in (
+                "scale",
+                "slider",
+                "spin button",
+                "progress bar",
+                "progressbar",
+            ):
+                need_val.append(node)
+            for child in node.get("children", []):
+                _collect(child, depth + 1)
+
+        _collect(pruned, 0)
+
+        sem = asyncio.Semaphore(16)
+
+        async def _call_bounded(msg: Message) -> Any:
+            async with sem:
+                return await self.bus.call(msg)  # type: ignore[union-attr]
+
+        tasks: list[Any] = []
+        targets: list[tuple[str, dict[str, Any]]] = []
+        for node in need_win_ext:
+            targets.append(("win", node))
+            tasks.append(
+                _call_bounded(
+                    Message(
+                        destination=node["bus_name"],
+                        path=node["path"],
+                        interface="org.a11y.atspi.Component",
+                        member="GetExtents",
+                        signature="u",
+                        body=[1],
+                    )
+                )
+            )
+        for node in need_scr_ext:
+            targets.append(("scr", node))
+            tasks.append(
+                _call_bounded(
+                    Message(
+                        destination=node["bus_name"],
+                        path=node["path"],
+                        interface="org.a11y.atspi.Component",
+                        member="GetExtents",
+                        signature="u",
+                        body=[0],
+                    )
+                )
+            )
+        for node in need_val:
+            targets.append(("val", node))
+            tasks.append(
+                _call_bounded(
+                    Message(
+                        destination=node["bus_name"],
+                        path=node["path"],
+                        interface="org.a11y.atspi.Value",
+                        member="GetCurrentValue",
+                    )
+                )
+            )
+
+        if tasks:
+            replies = await asyncio.gather(*tasks, return_exceptions=True)
+            for (kind, node), rep in zip(targets, replies, strict=True):
+                if (
+                    isinstance(rep, BaseException)
+                    or rep is None
+                    or getattr(rep, "message_type", None) == MessageType.ERROR
+                    or not getattr(rep, "body", None)
+                ):
+                    continue
+                if kind == "win":
+                    b = rep.body[0]
+                    if isinstance(b, (list, tuple)) and len(b) >= 4:
+                        node["bounds"] = [int(b[0]), int(b[1]), int(b[2]), int(b[3])]
+                elif kind == "scr":
+                    sb = rep.body[0]
+                    if isinstance(sb, (list, tuple)) and len(sb) >= 4:
+                        node["screen_bounds"] = [int(sb[0]), int(sb[1]), int(sb[2]), int(sb[3])]
+                elif kind == "val":
+                    node["value"] = float(rep.body[0])
+
+        return pruned
 
     async def _traverse_node(
         self,
@@ -224,10 +493,19 @@ class AtspiInspector:
         path: str,
         current_depth: int,
         max_depth: int,
+        visited: set[tuple[str, str]] | None = None,
+        sem: asyncio.Semaphore | None = None,
     ) -> dict[str, Any]:
-        """Recursively inspects an AT-SPI accessible node."""
+        """Recursively inspects an AT-SPI accessible node with bounded concurrency."""
         if not self.bus or current_depth > max_depth:
             return {}
+
+        if visited is None:
+            visited = set()
+        node_key = (bus_name, path)
+        if node_key in visited:
+            return {}
+        visited.add(node_key)
 
         node: dict[str, Any] = {
             "bus_name": bus_name,
@@ -239,9 +517,15 @@ class AtspiInspector:
             "children": [],
         }
 
+        async def _call_bounded(msg: Message) -> Any:
+            if sem is None:
+                return await self.bus.call(msg)  # type: ignore[union-attr]
+            async with sem:
+                return await self.bus.call(msg)  # type: ignore[union-attr]
+
         try:
-            try:
-                name_reply = await self.bus.call(
+            calls = [
+                _call_bounded(
                     Message(
                         destination=bus_name,
                         path=path,
@@ -250,44 +534,24 @@ class AtspiInspector:
                         signature="ss",
                         body=["org.a11y.atspi.Accessible", "Name"],
                     )
-                )
-                if name_reply and name_reply.body:
-                    val = name_reply.body[0]
-                    node["name"] = str(val.value if hasattr(val, "value") else val)
-            except Exception:
-                pass
-
-            try:
-                role_reply = await self.bus.call(
+                ),
+                _call_bounded(
                     Message(
                         destination=bus_name,
                         path=path,
                         interface="org.a11y.atspi.Accessible",
                         member="GetRoleName",
                     )
-                )
-                if role_reply and role_reply.body:
-                    node["role"] = str(role_reply.body[0]).lower()
-            except Exception:
-                pass
-
-            try:
-                state_reply = await self.bus.call(
+                ),
+                _call_bounded(
                     Message(
                         destination=bus_name,
                         path=path,
                         interface="org.a11y.atspi.Accessible",
                         member="GetState",
                     )
-                )
-                if state_reply and state_reply.body:
-                    node["states"] = self._decode_states(state_reply.body[0])
-            except Exception:
-                pass
-
-            # Geometry query: Component interface (WINDOW coordinate type = 1)
-            try:
-                extents_reply = await self.bus.call(
+                ),
+                _call_bounded(
                     Message(
                         destination=bus_name,
                         path=path,
@@ -296,17 +560,55 @@ class AtspiInspector:
                         signature="u",
                         body=[1],  # 1 = ATSPI_COORD_TYPE_WINDOW
                     )
+                ),
+            ]
+            if current_depth < max_depth:
+                calls.append(
+                    _call_bounded(
+                        Message(
+                            destination=bus_name,
+                            path=path,
+                            interface="org.a11y.atspi.Accessible",
+                            member="GetChildren",
+                        )
+                    )
                 )
 
-                if extents_reply and extents_reply.body:
-                    b = extents_reply.body[0]
-                    node["bounds"] = [int(b[0]), int(b[1]), int(b[2]), int(b[3])]
-            except Exception:
-                pass
+            results = await asyncio.gather(*calls, return_exceptions=True)
 
-            if current_depth == 0 or node["role"] in ("frame", "window", "dialog"):
-                try:
-                    screen_reply = await self.bus.call(
+            def _ok(rep: Any) -> bool:
+                return (
+                    not isinstance(rep, BaseException)
+                    and rep is not None
+                    and getattr(rep, "message_type", None) != MessageType.ERROR
+                    and bool(getattr(rep, "body", None))
+                )
+
+            name_reply = results[0]
+            if _ok(name_reply):
+                val = name_reply.body[0]
+                node["name"] = str(val.value if hasattr(val, "value") else val)
+
+            role_reply = results[1]
+            if _ok(role_reply):
+                node["role"] = str(role_reply.body[0]).lower()
+
+            state_reply = results[2]
+            if _ok(state_reply):
+                node["states"] = self._decode_states(state_reply.body[0])
+
+            extents_reply = results[3]
+            if _ok(extents_reply):
+                b = extents_reply.body[0]
+                if isinstance(b, (list, tuple)) and len(b) >= 4:
+                    node["bounds"] = [int(b[0]), int(b[1]), int(b[2]), int(b[3])]
+
+            extra_calls: list[Any] = []
+            want_screen = current_depth == 0 or node["role"] in ("frame", "window", "dialog")
+            want_val = node["role"] in ("scale", "slider", "spin button", "progressbar")
+            if want_screen:
+                extra_calls.append(
+                    _call_bounded(
                         Message(
                             destination=bus_name,
                             path=path,
@@ -316,16 +618,10 @@ class AtspiInspector:
                             body=[0],  # 0: ATSPI_COORD_TYPE_SCREEN
                         )
                     )
-                    if screen_reply and screen_reply.body:
-                        sb = screen_reply.body[0]
-                        node["screen_bounds"] = [int(sb[0]), int(sb[1]), int(sb[2]), int(sb[3])]
-                except Exception:
-                    pass
-
-            # Query value if object implements Value interface
-            if node["role"] in ("scale", "slider", "spin button", "progressbar"):
-                try:
-                    val_reply = await self.bus.call(
+                )
+            if want_val:
+                extra_calls.append(
+                    _call_bounded(
                         Message(
                             destination=bus_name,
                             path=path,
@@ -333,28 +629,48 @@ class AtspiInspector:
                             member="GetCurrentValue",
                         )
                     )
-                    if val_reply and val_reply.body:
-                        node["value"] = float(val_reply.body[0])
-                except Exception:
-                    pass
-
-            # Traverse children
-            if current_depth < max_depth:
-                child_msg = Message(
-                    destination=bus_name,
-                    path=path,
-                    interface="org.a11y.atspi.Accessible",
-                    member="GetChildren",
                 )
-                children_reply = await self.bus.call(child_msg)
-                if children_reply and children_reply.body:
+            if extra_calls:
+                extra_res = await asyncio.gather(*extra_calls, return_exceptions=True)
+                e_idx = 0
+                if want_screen:
+                    screen_reply = extra_res[e_idx]
+                    e_idx += 1
+                    if _ok(screen_reply):
+                        sb = screen_reply.body[0]
+                        if isinstance(sb, (list, tuple)) and len(sb) >= 4:
+                            node["screen_bounds"] = [
+                                int(sb[0]),
+                                int(sb[1]),
+                                int(sb[2]),
+                                int(sb[3]),
+                            ]
+                if want_val:
+                    val_reply = extra_res[e_idx]
+                    if _ok(val_reply):
+                        node["value"] = float(val_reply.body[0])
+
+            # Traverse children concurrently while preserving order and index_in_parent
+            if current_depth < max_depth and len(results) > 4:
+                children_reply = results[4]
+                if _ok(children_reply):
                     child_refs = children_reply.body[0]
-                    for idx, c_ref in enumerate(child_refs):
-                        c_bus, c_path = c_ref[0], c_ref[1]
-                        child_node = await self._traverse_node(
-                            c_bus, c_path, current_depth + 1, max_depth
-                        )
-                        if child_node:
+                    child_results = await asyncio.gather(
+                        *[
+                            self._traverse_node(
+                                c_ref[0],
+                                c_ref[1],
+                                current_depth + 1,
+                                max_depth,
+                                visited=visited,
+                                sem=sem,
+                            )
+                            for c_ref in child_refs
+                        ],
+                        return_exceptions=True,
+                    )
+                    for idx, child_node in enumerate(child_results):
+                        if isinstance(child_node, dict) and child_node:
                             child_node["index_in_parent"] = idx
                             node["children"].append(child_node)
 

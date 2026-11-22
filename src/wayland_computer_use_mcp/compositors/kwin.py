@@ -80,8 +80,8 @@ class KWinBackend(CompositorBackend):
         except Exception:
             return False
 
-    async def get_window_geometry(
-        self, pid: int | None = None, title: str | None = None
+    async def _run_geometry_script(
+        self, pid: int | None, title: str | None, *, activate: bool
     ) -> WindowGeometry | None:
         if not _has_wayland_display():
             return None
@@ -106,8 +106,12 @@ class KWinBackend(CompositorBackend):
         bus.add_message_handler(msg_handler)
 
         target_pid = pid or 0
-        target_title = title or ""
-        target_title_js = json.dumps(target_title)
+        target_title_js = json.dumps(title or "")
+        activate_block = (
+            "if (w.minimized) { w.minimized = false; }\n            workspace.activeWindow = w;"
+            if activate
+            else ""
+        )
         js_code = f"""
         var targetTitle = {target_title_js};
         var targetPid = {target_pid};
@@ -140,11 +144,7 @@ class KWinBackend(CompositorBackend):
         }}
         if (matchedWindow) {{
             var w = matchedWindow;
-            if (w.minimized) {{
-                w.minimized = false;
-            }}
-            w.keepAbove = true;
-            workspace.activeWindow = w;
+            {activate_block}
             var cg = w.clientGeometry || w.bufferGeometry || w.frameGeometry;
             var gx = (cg ? cg.x : w.x) || 0;
             var gy = (cg ? cg.y : w.y) || 0;
@@ -209,10 +209,15 @@ class KWinBackend(CompositorBackend):
                     pass
             bus.disconnect()
 
+    async def get_window_geometry(
+        self, pid: int | None = None, title: str | None = None
+    ) -> WindowGeometry | None:
+        return await self._run_geometry_script(pid=pid, title=title, activate=False)
+
     async def activate_and_raise_window(
         self, pid: int | None = None, title: str | None = None
     ) -> bool:
-        geom = await self.get_window_geometry(pid=pid, title=title)
+        geom = await self._run_geometry_script(pid=pid, title=title, activate=True)
         return geom is not None
 
     async def get_active_displays(self) -> list[DisplayInfo]:

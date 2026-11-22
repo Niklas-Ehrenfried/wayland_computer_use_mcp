@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -60,7 +60,10 @@ def uninstall_from_desktop(app_id: str) -> dict[str, Any]:
     return remove_desktop_app(app_id=app_id)
 
 
-def window_control(action: str, pid: int | None = None) -> dict[str, Any]:
+def window_control(
+    action: Literal["minimize", "maximize", "restore", "focus", "close"],
+    pid: int | None = None,
+) -> dict[str, Any]:
     """Controls window state across any active Wayland compositor (KDE, GNOME, Hyprland, Sway).
 
     Supported actions:

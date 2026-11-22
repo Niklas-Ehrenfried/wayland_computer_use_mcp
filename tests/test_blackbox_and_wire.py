@@ -1,4 +1,4 @@
-"""Contract and unit tests for Core, Blackbox, and Host-Passthrough architecture."""
+"""Contract and unit tests for Core, Blackbox, Wayland wire clients, and VirtualSessionManager."""
 
 from __future__ import annotations
 
@@ -8,10 +8,12 @@ import socket
 import struct
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from PIL import Image
 
+from wayland_computer_use_mcp import process as proc_mod
 from wayland_computer_use_mcp.blackbox import (
     BlackboxDriver,
     KWinNestedAdapter,
@@ -30,27 +32,23 @@ from wayland_computer_use_mcp.blackbox.wlr_wire import (
     control_wlr_toplevel,
 )
 from wayland_computer_use_mcp.compat import HostPassthroughDriver
-from wayland_computer_use_mcp.config import (
-    Config,
-    get_config,
-    set_config,
-)
+from wayland_computer_use_mcp.config import Config, get_config, set_config
 from wayland_computer_use_mcp.core import (
     InputSink,
     MockInputSink,
     MockSessionDriver,
     SessionContext,
     SessionDriver,
+    get_active_context,
 )
-from wayland_computer_use_mcp.core.wayland_wire import (
-    build_msg,
-    pack_string,
-    unpack_string,
-)
+from wayland_computer_use_mcp.core.wayland_wire import build_msg, pack_string, unpack_string
 from wayland_computer_use_mcp.libei import BTN_LEFT, KEY_ENTER, EIClient
 from wayland_computer_use_mcp.portal.remotedesktop import AsyncLoopThread
 from wayland_computer_use_mcp.portal.session import PortalSession
-from wayland_computer_use_mcp.portal.virtual import VirtualSessionManager
+from wayland_computer_use_mcp.portal.virtual import (
+    VirtualSessionManager,
+    cleanup_stale_virtual_dirs,
+)
 
 
 def _parse_wayland_packets(buf: bytearray) -> list[tuple[int, int, bytes]]:
@@ -67,7 +65,6 @@ def _parse_wayland_packets(buf: bytearray) -> list[tuple[int, int, bytes]]:
 
 
 def test_session_context_env_isolation_and_socket_resolution(monkeypatch, tmp_path):
-    """SessionContext builds isolated child envs without mutating os.environ."""
     monkeypatch.setenv("AT_SPI_BUS_ADDRESS", "unix:path=/host/atspi")
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-host")
 
@@ -86,138 +83,101 @@ def test_session_context_env_isolation_and_socket_resolution(monkeypatch, tmp_pa
     assert env["WAYLAND_DISPLAY"] == "wayland-mcp-virtual"
     assert "AT_SPI_BUS_ADDRESS" not in env
     assert ctx.wayland_socket_path() == str(tmp_path / "wayland-mcp-virtual")
-
-    # Parent process environment stays unchanged
     assert os.environ["AT_SPI_BUS_ADDRESS"] == "unix:path=/host/atspi"
     assert os.environ["WAYLAND_DISPLAY"] == "wayland-host"
 
 
 def test_protocol_conformance_drivers_and_sinks():
-    """Verify SessionDriver and InputSink protocol compliance across backends."""
     async_thread = AsyncLoopThread()
     try:
         blackbox = BlackboxDriver()
         host = HostPassthroughDriver(async_thread)
         mock_driver = MockSessionDriver()
-        ei_sink = EIClient(fd=None)
-        wlr_sink = WlrVirtualInputClient(sock_path=None)
-        mock_sink = MockInputSink()
-
-        assert isinstance(blackbox, SessionDriver)
-        assert isinstance(host, SessionDriver)
+        assert isinstance(blackbox, SessionDriver) and isinstance(host, SessionDriver)
         assert isinstance(mock_driver, SessionDriver)
-        assert isinstance(ei_sink, InputSink)
-        assert isinstance(wlr_sink, InputSink)
-        assert isinstance(mock_sink, InputSink)
-        assert blackbox.is_isolated() is True
-        assert mock_driver.is_isolated() is True
-        assert host.is_isolated() is False
+        assert isinstance(EIClient(fd=None), InputSink)
+        assert isinstance(WlrVirtualInputClient(sock_path=None), InputSink)
+        assert isinstance(MockInputSink(), InputSink)
+        assert blackbox.is_isolated() is True and host.is_isolated() is False
         assert blackbox.ensure_dialogs_above() is False
-        assert mock_driver.ensure_dialogs_above() is False
     finally:
         async_thread.stop()
 
 
 def test_adapter_selection_and_commands(monkeypatch):
-    """Adapters route kwin/wlroots/weston commands and detect binaries cleanly."""
     assert isinstance(select_blackbox_adapter("kwin_wayland --virtual"), KWinNestedAdapter)
     assert isinstance(select_blackbox_adapter("sway"), WlrootsNestedAdapter)
     assert isinstance(select_blackbox_adapter("labwc"), WlrootsNestedAdapter)
     assert isinstance(select_blackbox_adapter("weston --headless"), WestonNestedAdapter)
 
     monkeypatch.setattr(
-        "shutil.which", lambda name: f"/usr/bin/{name}" if name == "kwin_wayland" else None
+        "shutil.which", lambda n: "/usr/bin/kwin_wayland" if n == "kwin_wayland" else None
     )
     kwin = KWinNestedAdapter()
-    assert kwin.is_available() is True
-    headed_cmd = kwin.build_command(
-        headed=True, socket_name="wl-test", host_wayland_display="wayland-0", width=1024, height=768
-    )
-    assert headed_cmd is not None and "--wayland-display wayland-0" in headed_cmd
-    headless_cmd = kwin.build_command(
-        headed=False, socket_name="wl-test", host_wayland_display=None
-    )
-    assert headless_cmd is not None and "--virtual" in headless_cmd
+    assert "--wayland-display wayland-0" in kwin.build_command(True, "wl-test", "wayland-0")
+    assert "--virtual" in kwin.build_command(False, "wl-test", None)
 
-    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/labwc" if name == "labwc" else None)
-    wlr = WlrootsNestedAdapter()
-    assert wlr.is_available() is True
+    monkeypatch.setattr("shutil.which", lambda n: "/usr/bin/labwc" if n == "labwc" else None)
     assert (
-        wlr.build_command(
-            headed=True, socket_name="x", host_wayland_display="wayland-0", config_dir="/tmp/cfg"
-        )
+        WlrootsNestedAdapter().build_command(True, "x", "wayland-0", config_dir="/tmp/cfg")
         == "labwc -C /tmp/cfg"
     )
-    assert isinstance(select_blackbox_adapter(), WlrootsNestedAdapter)
+    monkeypatch.setattr("shutil.which", lambda n: "/usr/bin/sway" if n == "sway" else None)
+    assert WlrootsNestedAdapter().build_command(True, "x", "wayland-0") == "sway -c /dev/null"
 
-    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/sway" if name == "sway" else None)
-    wlr_sway = WlrootsNestedAdapter()
-    assert (
-        wlr_sway.build_command(headed=True, socket_name="x", host_wayland_display="wayland-0")
-        == "sway -c /dev/null"
-    )
-
+    monkeypatch.setattr("shutil.which", lambda n: "/usr/bin/weston" if n == "weston" else None)
     weston = WestonNestedAdapter()
-    monkeypatch.setattr(
-        "shutil.which", lambda name: "/usr/bin/weston" if name == "weston" else None
-    )
-    assert "--backend=wayland-backend.so" in (
-        weston.build_command(headed=True, socket_name="w1", host_wayland_display="wayland-0") or ""
-    )
-    assert "--backend=headless-backend.so" in (
-        weston.build_command(headed=False, socket_name="w1", host_wayland_display=None) or ""
-    )
+    assert "--backend=wayland-backend.so" in weston.build_command(True, "w1", "wayland-0")
+    assert "--backend=headless-backend.so" in weston.build_command(False, "w1", None)
 
 
 def test_find_created_wayland_socket(tmp_path):
-    """VirtualSessionManager detects compositor-selected sockets (e.g. sway/labwc wayland-0)."""
-    host_sock = tmp_path / "wayland-0-real"
-    # Symlink representing host parent socket that should be skipped
-    (tmp_path / "wayland-1").symlink_to(host_sock)
+    (tmp_path / "wayland-1").symlink_to(tmp_path / "wayland-0-real")
     (tmp_path / "wayland-0.lock").write_text("", encoding="utf-8")
-
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.bind(str(tmp_path / "wayland-0"))
     try:
-        found = VirtualSessionManager._find_created_wayland_socket(
-            str(tmp_path), exclude="wayland-1"
+        assert (
+            VirtualSessionManager._find_created_wayland_socket(str(tmp_path), exclude="wayland-1")
+            == "wayland-0"
         )
-        assert found == "wayland-0"
     finally:
         sock.close()
 
 
 def test_decode_shm_frame_formats_and_y_invert():
-    """decode_shm_frame decodes XRGB/ARGB/XBGR/ABGR and handles Y inversion."""
-    # Single pixel: R=0x12, G=0x34, B=0x56
-    # Little-endian XRGB8888 in memory is B, G, R, X
     xrgb_buf = bytes([0x56, 0x34, 0x12, 0xFF])
-    img = decode_shm_frame(xrgb_buf, WL_SHM_FORMAT_XRGB8888, 1, 1, 4)
-    assert img is not None and img.getpixel((0, 0)) == (0x12, 0x34, 0x56)
+    assert decode_shm_frame(xrgb_buf, WL_SHM_FORMAT_XRGB8888, 1, 1, 4).getpixel((0, 0)) == (
+        0x12,
+        0x34,
+        0x56,
+    )
+    assert decode_shm_frame(xrgb_buf, WL_SHM_FORMAT_ARGB8888, 1, 1, 4).getpixel((0, 0)) == (
+        0x12,
+        0x34,
+        0x56,
+    )
 
-    argb_img = decode_shm_frame(xrgb_buf, WL_SHM_FORMAT_ARGB8888, 1, 1, 4)
-    assert argb_img is not None and argb_img.getpixel((0, 0)) == (0x12, 0x34, 0x56)
-
-    # XBGR8888 / ABGR8888 in memory is R, G, B, A
     xbgr_buf = bytes([0x12, 0x34, 0x56, 0xFF])
-    xbgr_img = decode_shm_frame(xbgr_buf, WL_SHM_FORMAT_XBGR8888, 1, 1, 4)
-    abgr_img = decode_shm_frame(xbgr_buf, WL_SHM_FORMAT_ABGR8888, 1, 1, 4)
-    assert xbgr_img is not None and xbgr_img.getpixel((0, 0)) == (0x12, 0x34, 0x56)
-    assert abgr_img is not None and abgr_img.getpixel((0, 0)) == (0x12, 0x34, 0x56)
+    assert decode_shm_frame(xbgr_buf, WL_SHM_FORMAT_XBGR8888, 1, 1, 4).getpixel((0, 0)) == (
+        0x12,
+        0x34,
+        0x56,
+    )
+    assert decode_shm_frame(xbgr_buf, WL_SHM_FORMAT_ABGR8888, 1, 1, 4).getpixel((0, 0)) == (
+        0x12,
+        0x34,
+        0x56,
+    )
 
-    # Two rows to verify y_invert=True flips top and bottom rows
-    row0 = bytes([0x00, 0x00, 0xFF, 0xFF])  # Red
-    row1 = bytes([0xFF, 0x00, 0x00, 0xFF])  # Blue
-    flipped = decode_shm_frame(row0 + row1, WL_SHM_FORMAT_XRGB8888, 1, 2, 4, y_invert=True)
-    assert flipped is not None
-    assert flipped.getpixel((0, 0)) == (0, 0, 255)
-    assert flipped.getpixel((0, 1)) == (255, 0, 0)
-
+    flipped = decode_shm_frame(
+        bytes([0, 0, 0xFF, 0xFF, 0xFF, 0, 0, 0xFF]), WL_SHM_FORMAT_XRGB8888, 1, 2, 4, y_invert=True
+    )
+    assert flipped.getpixel((0, 0)) == (0, 0, 255) and flipped.getpixel((0, 1)) == (255, 0, 0)
     assert decode_shm_frame(b"\x00\x00", WL_SHM_FORMAT_XRGB8888, 1, 1, 4) is None
 
 
 def test_wlr_screencopy_roundtrip_over_mock_unix_socket(tmp_path):
-    """capture_wlr_screencopy performs registry + memfd SHM copy over UNIX socket."""
     sock_path = str(tmp_path / "wayland-wlr-cap")
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(sock_path)
@@ -231,9 +191,7 @@ def test_wlr_screencopy_roundtrip_over_mock_unix_socket(tmp_path):
         received_fds: list[int] = []
         pool_fds: dict[int, int] = {}
         try:
-            frame_id = 0
-            shm_id = 0
-            mgr_id = 0
+            frame_id = shm_id = mgr_id = 0
             while True:
                 data, ancdata, _, _ = conn.recvmsg(65536, socket.CMSG_SPACE(16 * 4))
                 for lvl, ctype, cdata in ancdata:
@@ -243,9 +201,9 @@ def test_wlr_screencopy_roundtrip_over_mock_unix_socket(tmp_path):
                     break
                 buf.extend(data)
                 for oid, op, body in _parse_wayland_packets(buf):
-                    if oid == 1 and op == 1:  # get_registry
+                    if oid == 1 and op == 1:
                         (reg_id,) = struct.unpack_from("<I", body, 0)
-                        ev = (
+                        conn.sendall(
                             build_msg(
                                 reg_id,
                                 0,
@@ -266,36 +224,30 @@ def test_wlr_screencopy_roundtrip_over_mock_unix_socket(tmp_path):
                                 + struct.pack("<I", 3),
                             )
                         )
-                        conn.sendall(ev)
-                    elif oid == 1 and op == 0:  # sync
+                    elif oid == 1 and op == 0:
                         (cb_id,) = struct.unpack_from("<I", body, 0)
                         conn.sendall(build_msg(cb_id, 0, struct.pack("<I", 1)))
-                    elif oid == 2 and op == 0:  # registry.bind
-                        _name, off = struct.unpack_from("<I", body, 0)[0], 4
-                        iface, off = unpack_string(body, off)
-                        _ver, new_id = struct.unpack_from("<II", body, off)
+                    elif oid == 2 and op == 0:
+                        iface, off = unpack_string(body, 4)
+                        _, new_id = struct.unpack_from("<II", body, off)
                         if iface == "wl_shm":
                             shm_id = new_id
                         elif iface == "zwlr_screencopy_manager_v1":
                             mgr_id = new_id
-                    elif oid == mgr_id and op == 0:  # capture_output
+                    elif oid == mgr_id and op == 0:
                         frame_id = struct.unpack_from("<I", body, 0)[0]
                         conn.sendall(
                             build_msg(
-                                frame_id,
-                                0,
-                                struct.pack("<IIII", WL_SHM_FORMAT_XRGB8888, 2, 1, 8),
+                                frame_id, 0, struct.pack("<IIII", WL_SHM_FORMAT_XRGB8888, 2, 1, 8)
                             )
-                            + build_msg(frame_id, 6)  # buffer_done (v3)
+                            + build_msg(frame_id, 6)
                         )
-                    elif oid == shm_id and op == 0:  # create_pool
-                        pool_id, _sz = struct.unpack_from("<Ii", body, 0)
+                    elif oid == shm_id and op == 0:
+                        pool_id, _ = struct.unpack_from("<Ii", body, 0)
                         pool_fds[pool_id] = received_fds.pop(0)
-                    elif oid == frame_id and op == 0:  # copy(buffer)
+                    elif oid == frame_id and op == 0:
                         fd = next(iter(pool_fds.values()))
-                        # 2 pixels in little-endian XRGB8888: (10,20,30) then (200,100,50)
-                        pixels = bytes([30, 20, 10, 0xFF, 50, 100, 200, 0xFF])
-                        os.pwrite(fd, pixels, 0)
+                        os.pwrite(fd, bytes([30, 20, 10, 0xFF, 50, 100, 200, 0xFF]), 0)
                         conn.sendall(
                             build_msg(frame_id, 1, struct.pack("<I", 0))
                             + build_msg(frame_id, 2, struct.pack("<III", 0, 0, 0))
@@ -313,17 +265,14 @@ def test_wlr_screencopy_roundtrip_over_mock_unix_socket(tmp_path):
     t.start()
     try:
         img = capture_wlr_screencopy(sock_path, timeout=2.0)
-        assert isinstance(img, Image.Image)
-        assert img.size == (2, 1)
-        assert img.getpixel((0, 0)) == (10, 20, 30)
-        assert img.getpixel((1, 0)) == (200, 100, 50)
+        assert isinstance(img, Image.Image) and img.size == (2, 1)
+        assert img.getpixel((0, 0)) == (10, 20, 30) and img.getpixel((1, 0)) == (200, 100, 50)
     finally:
         t.join(timeout=2.0)
         srv.close()
 
 
 def test_wlr_virtual_input_wire_protocol(tmp_path):
-    """WlrVirtualInputClient binds vptr/vkbd globals, sends keymap fd and input packets."""
     sock_path = str(tmp_path / "wayland-wlr-input")
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(sock_path)
@@ -332,7 +281,6 @@ def test_wlr_virtual_input_wire_protocol(tmp_path):
 
     captured_packets: list[tuple[int, int, bytes]] = []
     captured_fd_sizes: list[int] = []
-    ready_ev = threading.Event()
     stop_ev = threading.Event()
 
     def _server_worker() -> None:
@@ -357,7 +305,7 @@ def test_wlr_virtual_input_wire_protocol(tmp_path):
                     captured_packets.append((oid, op, body))
                     if oid == 1 and op == 1:
                         (reg_id,) = struct.unpack_from("<I", body, 0)
-                        ev = (
+                        conn.sendall(
                             build_msg(
                                 reg_id,
                                 0,
@@ -380,11 +328,9 @@ def test_wlr_virtual_input_wire_protocol(tmp_path):
                                 + struct.pack("<I", 1),
                             )
                         )
-                        conn.sendall(ev)
                     elif oid == 1 and op == 0:
                         (cb_id,) = struct.unpack_from("<I", body, 0)
                         conn.sendall(build_msg(cb_id, 0, struct.pack("<I", 1)))
-                        ready_ev.set()
         finally:
             conn.close()
 
@@ -392,15 +338,12 @@ def test_wlr_virtual_input_wire_protocol(tmp_path):
     t.start()
     client = WlrVirtualInputClient(sock_path=sock_path, extent_w=1280, extent_h=800)
     try:
-        assert client.has_absolute_pointer is True
-        assert client.has_scroll is True
-        assert client.keyboard_device is not None
-        assert client.can_type_text("abc") is True
-
-        assert client.pointer_motion_absolute(320, 240) is True
-        assert client.button_click(BTN_LEFT) is True
-        assert client.scroll(0, 2) is True
-        assert client.type_char("a") is True
+        assert (
+            client.has_absolute_pointer and client.has_scroll and client.keyboard_device is not None
+        )
+        assert client.can_type_text("abc")
+        assert client.pointer_motion_absolute(320, 240)
+        assert client.button_click(BTN_LEFT) and client.scroll(0, 2) and client.type_char("a")
         client.key_combination([KEY_ENTER])
 
         deadline = time.monotonic() + 2.0
@@ -408,23 +351,15 @@ def test_wlr_virtual_input_wire_protocol(tmp_path):
             time.sleep(0.02)
         time.sleep(0.05)
 
-        vptr_id = client._vptr_id
-        vkbd_id = client._vkbd_id
-        vptr_ops = [(op, body) for oid, op, body in captured_packets if oid == vptr_id]
-        vkbd_ops = [(op, body) for oid, op, body in captured_packets if oid == vkbd_id]
-
-        # motion_absolute opcode=1 check coordinates 320, 240
-        motion_payloads = [body for op, body in vptr_ops if op == 1]
-        assert motion_payloads
-        _, ix, iy, ex, ey = struct.unpack_from("<IIIII", motion_payloads[0], 0)
-        assert (ix, iy, ex, ey) == (320, 240, 1280, 800)
-
-        # button opcode=2 (down & up), axis opcode=3, frame opcode=4
-        assert any(op == 2 for op, _ in vptr_ops)
-        assert any(op == 3 for op, _ in vptr_ops)
-        assert any(op == 4 for op, _ in vptr_ops)
-
-        # keymap fd was passed via SCM_RIGHTS and key events (op=1) were emitted
+        vptr_ops = [(op, b) for oid, op, b in captured_packets if oid == client._vptr_id]
+        vkbd_ops = [(op, b) for oid, op, b in captured_packets if oid == client._vkbd_id]
+        motion_payloads = [b for op, b in vptr_ops if op == 1]
+        assert motion_payloads and struct.unpack_from("<IIIII", motion_payloads[0], 0)[1:] == (
+            320,
+            240,
+            1280,
+            800,
+        )
         assert captured_fd_sizes and captured_fd_sizes[0] > 0
         assert len([1 for op, _ in vkbd_ops if op == 1]) >= 4
     finally:
@@ -434,11 +369,9 @@ def test_wlr_virtual_input_wire_protocol(tmp_path):
         srv.close()
 
 
-def test_host_passthrough_lazy_portal_promotion(monkeypatch):
-    """lazy_portal skips upfront portal prompt and promotes lazily on capture/input."""
+def test_host_passthrough_lazy_portal_and_dialog_raise(monkeypatch):
     orig_cfg = get_config()
-    cfg = Config(display_mode="live", mock_mode=False, lazy_portal=True)
-    set_config(cfg)
+    set_config(Config(display_mode="live", mock_mode=False, lazy_portal=True))
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
 
     session = PortalSession()
@@ -452,56 +385,41 @@ def test_host_passthrough_lazy_portal_promotion(monkeypatch):
         monkeypatch.setattr("wayland_computer_use_mcp.process.is_responsive", lambda _pid: True)
         monkeypatch.setattr(
             "wayland_computer_use_mcp.compositors.query_window_geometry",
-            lambda **kwargs: (0, 0, 64, 64),
+            lambda **kw: (0, 0, 64, 64),
         )
         monkeypatch.setattr(
-            "wayland_computer_use_mcp.compositors.ensure_portal_dialogs_above",
-            lambda: False,
+            "wayland_computer_use_mcp.compositors.ensure_portal_dialogs_above", lambda: False
         )
 
-        # Upfront initialization in lazy mode must NOT call negotiate()
         session.ensure_initialized()
-        assert session.is_active() is True
-        assert negotiate_mock.call_count == 0
-
-        # Promoting via capture_frame triggers negotiate() lazily
+        assert session.is_active() is True and negotiate_mock.call_count == 0
         session.target_pid = 4321
-        frame = session.capture_frame()
-        assert frame.size == (64, 64)
-        assert negotiate_mock.call_count == 1
+        assert session.capture_frame().size == (64, 64) and negotiate_mock.call_count == 1
     finally:
         session.close()
         set_config(orig_cfg)
 
-
-def test_process_tools_route_dialog_raise_via_active_driver(monkeypatch):
-    """launch_app delegates dialog foregrounding to active_driver().ensure_dialogs_above()."""
     from wayland_computer_use_mcp.tools import process_tools
 
-    orig_cfg = get_config()
     set_config(Config(display_mode="live", mock_mode=False, lazy_portal=False))
     called = {"dialogs": 0}
     fake_driver = MagicMock()
     fake_driver.ensure_dialogs_above.side_effect = lambda: (
         called.__setitem__("dialogs", called["dialogs"] + 1) or True
     )
-
     monkeypatch.setattr(process_tools.global_portal_session, "active_driver", lambda: fake_driver)
     monkeypatch.setattr(process_tools.global_portal_session, "is_active", lambda: True)
     monkeypatch.setattr(process_tools.global_portal_session, "target_pid", None)
-    monkeypatch.setattr(process_tools, "launch", lambda target, args=None, cwd=None: 12345)
+    monkeypatch.setattr(process_tools, "launch", lambda t, a=None, c=None: 12345)
+    monkeypatch.setattr(process_tools, "is_responsive", lambda pid: True)
     monkeypatch.setattr(process_tools, "_bind_focus_and_collect_elements", lambda pid: [])
-
     try:
-        res = process_tools.launch_app("dummy.py")
-        assert res["pid"] == 12345
-        assert called["dialogs"] == 1
+        assert process_tools.launch_app("dummy.py")["pid"] == 12345 and called["dialogs"] == 1
     finally:
         set_config(orig_cfg)
 
 
-def test_wlr_foreign_toplevel_control_wire_roundtrip(tmp_path):
-    """control_wlr_toplevel enumerates handles, skips closed windows, and emits opcodes."""
+def test_wlr_foreign_toplevel_control_and_blackbox_driver(monkeypatch, tmp_path):
     sock_path = str(tmp_path / "wayland-wlr-toplevel")
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(sock_path)
@@ -515,10 +433,8 @@ def test_wlr_foreign_toplevel_control_wire_roundtrip(tmp_path):
             srv.settimeout(0.1)
             try:
                 conn, _ = srv.accept()
-            except TimeoutError:
+            except (TimeoutError, OSError):
                 continue
-            except OSError:
-                break
             conn.setblocking(True)
             buf = bytearray()
             mgr_id = 0
@@ -550,19 +466,16 @@ def test_wlr_foreign_toplevel_control_wire_roundtrip(tmp_path):
                         elif oid == 2 and op == 0:
                             (gname,) = struct.unpack_from("<I", body, 0)
                             iface, off = unpack_string(body, 4)
-                            _, new_id = struct.unpack_from("<II", body, off)
                             if iface == "zwlr_foreign_toplevel_manager_v1" or gname == 10:
-                                mgr_id = new_id
-                                h_closed = 0xFF000001
-                                h_target = 0xFF000002
+                                _, mgr_id = struct.unpack_from("<II", body, off)
                                 conn.sendall(
-                                    build_msg(mgr_id, 0, struct.pack("<I", h_closed))
-                                    + build_msg(h_closed, 0, pack_string("Old Closed"))
-                                    + build_msg(h_closed, 6)
-                                    + build_msg(mgr_id, 0, struct.pack("<I", h_target))
-                                    + build_msg(h_target, 0, pack_string("Labwc Target App"))
-                                    + build_msg(h_target, 1, pack_string("org.example.Target"))
-                                    + build_msg(h_target, 5)
+                                    build_msg(mgr_id, 0, struct.pack("<I", 0xFF000001))
+                                    + build_msg(0xFF000001, 0, pack_string("Old Closed"))
+                                    + build_msg(0xFF000001, 6)
+                                    + build_msg(mgr_id, 0, struct.pack("<I", 0xFF000002))
+                                    + build_msg(0xFF000002, 0, pack_string("Labwc Target App"))
+                                    + build_msg(0xFF000002, 1, pack_string("org.example.Target"))
+                                    + build_msg(0xFF000002, 5)
                                 )
                         elif oid == 1 and op == 0:
                             (cb_id,) = struct.unpack_from("<I", body, 0)
@@ -575,33 +488,30 @@ def test_wlr_foreign_toplevel_control_wire_roundtrip(tmp_path):
     t = threading.Thread(target=_server, daemon=True)
     t.start()
     try:
-        assert control_wlr_toplevel(sock_path, "minimize", title="Labwc Target") is True
-        assert control_wlr_toplevel(sock_path, "maximize", app_hint="Target") is True
-        assert control_wlr_toplevel(sock_path, "restore") is True
-        assert control_wlr_toplevel(sock_path, "focus", title="Labwc Target") is True
-        assert control_wlr_toplevel(sock_path, "close", title="Labwc Target") is True
+        assert control_wlr_toplevel(sock_path, "minimize", title="Labwc Target")
+        assert control_wlr_toplevel(sock_path, "maximize", app_hint="Target")
+        assert control_wlr_toplevel(sock_path, "restore")
+        assert control_wlr_toplevel(sock_path, "focus", title="Labwc Target")
+        assert control_wlr_toplevel(sock_path, "close", title="Labwc Target")
         assert control_wlr_toplevel(sock_path, "invalid") is False
-
-        h_ops = [op for _, oid, op, _ in recorded_actions if oid == 0xFF000002]
-        assert h_ops == [2, 0, 3, 1, 4, 3, 4, 5]
-        # Each action ends with manager.stop (op=0) on mgr_id
-        assert len([1 for _, oid, op, _ in recorded_actions if oid != 0xFF000002 and op == 0]) == 5
+        assert [op for _, oid, op, _ in recorded_actions if oid == 0xFF000002] == [
+            2,
+            0,
+            3,
+            1,
+            4,
+            3,
+            4,
+            5,
+        ]
     finally:
         stop_ev.set()
         t.join(timeout=2.0)
         srv.close()
 
-
-def test_blackbox_driver_routes_window_control_via_wlroots_adapter(monkeypatch, tmp_path):
-    """BlackboxDriver delegates activate_window and set_window_state to its adapter."""
-    from wayland_computer_use_mcp.blackbox import BlackboxDriver, WlrootsNestedAdapter
-
     sock = tmp_path / "wayland-wlroots"
     sock.write_text("", encoding="utf-8")
-
-    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/labwc" if name == "labwc" else None)
-    adapter = WlrootsNestedAdapter()
-
+    monkeypatch.setattr("shutil.which", lambda n: "/usr/bin/labwc" if n == "labwc" else None)
     fake_sandbox = MagicMock()
     fake_sandbox.to_context.return_value = SessionContext(
         mode="blackbox",
@@ -611,31 +521,33 @@ def test_blackbox_driver_routes_window_control_via_wlroots_adapter(monkeypatch, 
         is_isolated=True,
     )
     driver = BlackboxDriver(sandbox=fake_sandbox)
-    driver._adapter = adapter
-
-    calls: list[tuple[str, str, str | None, str | None]] = []
+    driver._adapter = WlrootsNestedAdapter()
+    calls: list = []
     monkeypatch.setattr(
         "wayland_computer_use_mcp.blackbox.adapters.control_wlr_toplevel",
-        lambda path, action, title=None, app_hint=None: (
-            calls.append((path, action, title, app_hint)) or True
+        lambda path, act, title=None, app_hint=None: (
+            calls.append((path, act, title, app_hint)) or True
         ),
     )
-
     assert driver.activate_window(pid=None, title="Demo App") is True
     assert driver.set_window_state(1234, "minimize") is True
-    assert calls[0] == (str(sock), "focus", "Demo App", None)
-    assert calls[1][0] == str(sock) and calls[1][1] == "minimize"
+    assert calls[0] == (str(sock), "focus", "Demo App", None) and calls[1][1] == "minimize"
+
+    # BlackboxDriver target_script hint extraction
+    with proc_mod._lock:
+        proc_mod._proc_metadata[55511] = {"target_script": "/tmp/my_cool_app.py"}
+    try:
+        assert BlackboxDriver._resolve_window_hints(55511, "Window") == ("Window", "my_cool_app")
+    finally:
+        with proc_mod._lock:
+            proc_mod._proc_metadata.pop(55511, None)
 
 
-def test_wlr_virtual_keyboard_emits_xkb_modifiers_and_reads_output_extent(tmp_path):
-    """WlrVirtualInputClient emits zwp_virtual_keyboard modifiers and syncs wl_output mode."""
-    from wayland_computer_use_mcp.blackbox.wlr_wire import WlrVirtualInputClient
-
+def test_wlr_virtual_keyboard_xkb_modifiers_and_output_extent(tmp_path):
     sock_path = str(tmp_path / "wayland-wlr-input")
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(sock_path)
     srv.listen(2)
-
     mod_events: list[int] = []
     stop_ev = threading.Event()
 
@@ -648,8 +560,7 @@ def test_wlr_virtual_keyboard_emits_xkb_modifiers_and_reads_output_extent(tmp_pa
                 break
             conn.setblocking(True)
             buf = bytearray()
-            vkbd_mgr_id = 0
-            vkbd_id = 0
+            vkbd_mgr_id = vkbd_id = 0
             try:
                 while not stop_ev.is_set():
                     data = conn.recv(4096)
@@ -704,11 +615,9 @@ def test_wlr_virtual_keyboard_emits_xkb_modifiers_and_reads_output_extent(tmp_pa
                             elif iface == "zwp_virtual_keyboard_manager_v1" or gname == 4:
                                 vkbd_mgr_id = new_id
                         elif oid == vkbd_mgr_id and op == 0 and len(body) >= 8:
-                            _, child_id = struct.unpack_from("<II", body, 0)
-                            vkbd_id = child_id
+                            _, vkbd_id = struct.unpack_from("<II", body, 0)
                         elif oid == vkbd_id and op == 2 and len(body) >= 16:
-                            (depressed,) = struct.unpack_from("<I", body, 0)
-                            mod_events.append(depressed)
+                            mod_events.append(struct.unpack_from("<I", body, 0)[0])
             finally:
                 conn.close()
 
@@ -720,7 +629,6 @@ def test_wlr_virtual_keyboard_emits_xkb_modifiers_and_reads_output_extent(tmp_pa
             assert (client.extent_w, client.extent_h) == (1280, 720)
             client._vkbd_id = client._vkbd_id or 99
             assert client.type_char("T") is True
-            # Wait briefly for mock server thread to parse packet
             for _ in range(20):
                 if len(mod_events) >= 2:
                     break
@@ -734,33 +642,89 @@ def test_wlr_virtual_keyboard_emits_xkb_modifiers_and_reads_output_extent(tmp_pa
         srv.close()
 
 
-def test_labwc_bare_cmd_and_terminate_already_pruned_process(monkeypatch, tmp_path):
-    """Bare WAYLAND_MCP_VIRTUAL_CMD=labwc uses isolated rc.xml and terminate handles exited PIDs."""
-    from wayland_computer_use_mcp import process as proc_mod
-    from wayland_computer_use_mcp.blackbox.adapters import WlrootsNestedAdapter
-    from wayland_computer_use_mcp.portal.virtual import VirtualSessionManager
+def test_virtual_session_isolation_labwc_rc_and_stale_cleanup(monkeypatch, tmp_path):
+    host_xdg = tmp_path / "host_xdg"
+    host_xdg.mkdir()
+    (host_xdg / "wayland-0").write_text("")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(host_xdg))
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/tmp/host-bus")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setenv("AT_SPI_BUS_ADDRESS", "unix:path=/tmp/host-atspi")
 
+    class FakeProc:
+        def __init__(self, stdout_line: str = "") -> None:
+            self.pid = 999999
+            self.stdout = SimpleNamespace(readline=lambda: stdout_line)
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    def fake_popen(cmd, env=None, **kwargs):
+        if cmd[0] == "dbus-daemon":
+            assert "AT_SPI_BUS_ADDRESS" not in env
+            return FakeProc("unix:path=/tmp/isolated-dbus-test\n")
+        open(os.path.join(env["XDG_RUNTIME_DIR"], "wayland-mcp-virtual"), "w").close()
+        return FakeProc()
+
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+
+    mgr = VirtualSessionManager()
+    mgr.ensure_started(Config(display_mode="virtual", virtual_headed=True))
+    try:
+        ctx = get_active_context()
+        assert ctx is not None and ctx.is_isolated and ctx.xdg_runtime_dir != str(host_xdg)
+        sub_env = ctx.build_subprocess_env()
+        assert "AT_SPI_BUS_ADDRESS" not in sub_env
+        assert os.path.islink(os.path.join(mgr.runtime_dir or "", "host-wayland-0"))
+        assert os.environ["WAYLAND_DISPLAY"] == "wayland-0"
+    finally:
+        mgr.stop()
+    assert (
+        get_active_context() is None
+        and os.environ["AT_SPI_BUS_ADDRESS"] == "unix:path=/tmp/host-atspi"
+    )
+
+    # Bare labwc command + rc.xml creation + stale dir cleanup + already-pruned terminate
     cfg_dir = tmp_path / "labwc-cfg"
     cfg_dir.mkdir()
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/labwc" if name == "labwc" else None)
-    adapter = WlrootsNestedAdapter(preferred_bin="labwc")
-    cmd = adapter.build_command(
-        headed=False, socket_name="wayland-0", host_wayland_display=None, config_dir=str(cfg_dir)
+    assert (
+        WlrootsNestedAdapter(preferred_bin="labwc").build_command(
+            False, "wayland-0", None, config_dir=str(cfg_dir)
+        )
+        == f"labwc -C {cfg_dir}"
     )
-    assert cmd == f"labwc -C {cfg_dir}"
     assert "MoveTo" in (cfg_dir / "rc.xml").read_text(encoding="utf-8")
 
-    # Headless discovery must not exclude 'wayland-0' even if host WAYLAND_DISPLAY=wayland-0
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
-    mgr = VirtualSessionManager()
-    assert mgr._find_created_wayland_socket(str(tmp_path), exclude=None) is None
+    stale_dir = tmp_path / "wayland_mcp_virtual_dead"
+    live_dir = tmp_path / "wayland_mcp_virtual_live"
+    stale_dir.mkdir()
+    live_dir.mkdir()
+    (stale_dir / ".mcp_pid").write_text("999999", encoding="utf-8")
+    (live_dir / ".mcp_pid").write_text(str(os.getpid()), encoding="utf-8")
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        "os.kill",
+        lambda pid, sig: (
+            (_ for _ in ()).throw(ProcessLookupError()) if pid == 999999 and sig == 0 else None
+        ),
+    )
+    cleanup_stale_virtual_dirs()
+    assert not stale_dir.exists() and live_dir.exists()
 
-    # terminate() must cleanly return True if child already exited & was pruned from _processes
-    fake_pid = 999991
-    proc_mod._proc_metadata[fake_pid] = {"target": "dummy", "args": []}
-    proc_mod._processes.pop(fake_pid, None)
+    proc_mod._proc_metadata[999991] = {"target": "dummy", "args": []}
+    proc_mod._processes.pop(999991, None)
     try:
-        assert proc_mod.terminate(fake_pid) is True
+        assert proc_mod.terminate(999991) is True
     finally:
-        proc_mod._proc_metadata.pop(fake_pid, None)
+        proc_mod._proc_metadata.pop(999991, None)

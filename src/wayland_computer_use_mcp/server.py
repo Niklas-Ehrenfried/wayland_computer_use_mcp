@@ -31,6 +31,8 @@ from wayland_computer_use_mcp.tools.input_tools import (
     drag,
     hover,
     key_combination,
+    keyboard,
+    mouse,
     right_click,
     scroll,
     type_text,
@@ -39,11 +41,13 @@ from wayland_computer_use_mcp.tools.navigation_tools import (
     batch_actions,
     inspect_ui_tree,
     interact_with_node,
+    wait_for_element,
     watch_ui_events,
 )
 from wayland_computer_use_mcp.tools.preset_tools import preset_workflow
 from wayland_computer_use_mcp.tools.process_tools import (
     get_app_logs,
+    get_session_status,
     launch_app,
     list_managed_apps,
     restart_app,
@@ -65,10 +69,22 @@ logger = logging.getLogger("wayland_computer_use_mcp")
 mcp = FastMCP(
     "wayland-computer-use-mcp",
     instructions=(
-        "Interactive Wayland window/desktop streaming, "
-        "AT-SPI UI inspection, tree-first semantic navigation, "
-        "reusable preset workflows, crash interception, "
-        "and clamped input suite with reactive JSON UI delta feedback."
+        "Wayland GUI testing & automation server using a Tree-First Hybrid Semantic Model.\n"
+        "Operating rules:\n"
+        "1. Discover mode/compositor/input readiness via get_session_status() if unsure.\n"
+        "2. Launch apps with launch_app(target) — initial interactive_elements, hierarchy, and "
+        "session metadata are returned immediately; avoid redundant inspect_ui_tree right after.\n"
+        "3. Prefer interact_with_node(target, action, role=...) and batch_actions(...) over "
+        "raw coordinates (Level 1 AT-SPI executes silently without moving the cursor).\n"
+        "4. Use ui_changes from interaction results to chain next actions; call "
+        "wait_for_element(target, state=...) instead of polling inspect_ui_tree in loops.\n"
+        "5. Use inspect_ui_tree(query=..., role_filter=...) to narrow large UIs; pass "
+        "include_raw_tree=True only when debugging raw AT-SPI D-Bus trees.\n"
+        "6. Reserve mouse(...) / keyboard(...) / capture_window_frame(target=..., "
+        "annotate_elements=...) for canvas UIs (when atspi_available is False) or visual checks.\n"
+        "7. Prefer semantic label + role locators when saving preset_workflow macros.\n"
+        "8. If a response includes a traceback warning or crash, inspect get_app_logs(), fix "
+        "the code, and relaunch with launch_app(..., restart=True) or restart_app()."
     ),
 )
 
@@ -183,15 +199,18 @@ __all__ = [
     "double_click",
     "drag",
     "get_app_logs",
+    "get_session_status",
     "hover",
     "inspect_ui_tree",
     "install_to_desktop",
     "interact_with_node",
     "key_combination",
+    "keyboard",
     "launch_app",
     "list_managed_apps",
     "main",
     "mcp",
+    "mouse",
     "preset_workflow",
     "restart_app",
     "right_click",
@@ -199,6 +218,7 @@ __all__ = [
     "terminate_app",
     "type_text",
     "uninstall_from_desktop",
+    "wait_for_element",
     "watch_ui_events",
     "window_control",
 ]

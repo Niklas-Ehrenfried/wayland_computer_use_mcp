@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 
@@ -13,6 +14,75 @@ from wayland_computer_use_mcp.a11y.client import run_atspi_sync as _run_async_sy
 from wayland_computer_use_mcp.a11y.tree import get_application_tree, get_cached_node
 
 logger = logging.getLogger(__name__)
+
+_POSITIONAL_ID_RE = re.compile(r"^(?:b|e|c|s|t|k|r|m|l|lbl|sb|sw|li|ti|cell|scr|w)\d+$")
+
+
+async def _get_accessible_name(bus_name: str, path: str) -> str | None:
+    """Fetches the live AT-SPI Accessible.Name for stale-ID verification."""
+    inspector = AtspiInspector()
+    if not await inspector.connect() or not inspector.bus:
+        return None
+    try:
+        rep = await inspector.bus.call(
+            Message(
+                destination=bus_name,
+                path=path,
+                interface="org.freedesktop.DBus.Properties",
+                member="Get",
+                signature="ss",
+                body=["org.a11y.atspi.Accessible", "Name"],
+            )
+        )
+        if not rep or rep.message_type == MessageType.ERROR or not rep.body:
+            return None
+        val = rep.body[0]
+        return str(val.value if hasattr(val, "value") else val).strip()
+    except Exception:
+        return None
+    finally:
+        await inspector.close()
+
+
+def _verify_cached_node_identity(pid: int, node_id: str, cached: dict[str, Any]) -> dict[str, Any]:
+    """Detects shifted positional node IDs against live AT-SPI and re-binds if possible."""
+    from wayland_computer_use_mcp.a11y.tree import _node_cache
+    from wayland_computer_use_mcp.config import get_config
+
+    if get_config().mock_mode or pid <= 0 or not _POSITIONAL_ID_RE.match(node_id):
+        return cached
+    bus_name = cached.get("bus_name")
+    path = cached.get("path")
+    expected_name = str(cached.get("name", "")).strip()
+    expected_role = str(cached.get("role", "")).strip().lower()
+    if not bus_name or not path or not expected_name:
+        return cached
+
+    try:
+        live_name = _run_async_sync(_get_accessible_name, str(bus_name), str(path))
+    except Exception:
+        return cached
+
+    if live_name is None or live_name == expected_name:
+        return cached
+
+    # Positional ID shifted since last inspection: refresh tree & re-bind by (name, role)
+    get_application_tree(pid)
+    refreshed = list(_node_cache.get(pid, {}).values())
+    for candidate in refreshed:
+        if (
+            str(candidate.get("name", "")).strip() == expected_name
+            and str(candidate.get("role", "")).strip().lower() == expected_role
+        ):
+            return candidate
+    for candidate in refreshed:
+        if str(candidate.get("name", "")).strip() == expected_name:
+            return candidate
+
+    raise ValueError(
+        f"Stale node ID '{node_id}' (expected '{expected_name}' [{expected_role}], "
+        f"found '{live_name}'). Re-inspect the UI tree or use a semantic target."
+    )
 
 
 async def perform_accessible_action(bus_name: str, path: str, action_index: int = 0) -> bool:
@@ -470,6 +540,8 @@ def invoke_node_action(
         raise ValueError(
             f"Element with ID '{node_id}' not found in accessibility tree for PID {pid}."
         )
+
+    cached = _verify_cached_node_identity(pid, node_id, cached)
 
     center = cached.get("center", [0, 0])
     target_x, target_y = center[0], center[1]

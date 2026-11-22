@@ -10,7 +10,7 @@ from typing import Any
 from PIL import Image
 
 import wayland_computer_use_mcp.compositors as compositors_pkg
-from wayland_computer_use_mcp.config import get_config
+from wayland_computer_use_mcp.config import get_config, resolve_effective_display_mode
 from wayland_computer_use_mcp.core.context import InputSink, SessionContext
 from wayland_computer_use_mcp.libei import BTN_LEFT, EIClient
 from wayland_computer_use_mcp.portal.remotedesktop import (
@@ -177,14 +177,14 @@ class HostPassthroughDriver:
         )
 
     def is_active(self) -> bool:
+        _, _, effective_lazy = resolve_effective_display_mode(get_config())
         return self._initialized and (
-            self.rd_client.pipewire_node_id is not None
-            or self._portal_negotiated
-            or get_config().lazy_portal
+            self.rd_client.pipewire_node_id is not None or self._portal_negotiated or effective_lazy
         )
 
     async def initialize(self, app_id: str = "default", eager: bool | None = None) -> None:
-        lazy = get_config().lazy_portal if eager is None else not eager
+        _, _, effective_lazy = resolve_effective_display_mode(get_config())
+        lazy = effective_lazy if eager is None else not eager
         if lazy:
             self._initialized = True
             return

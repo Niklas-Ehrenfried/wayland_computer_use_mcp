@@ -1,8 +1,4 @@
-"""Unit tests for the modular Compositor Abstraction Layer.
-
-Covers KWinBackend, GnomeBackend, WlrootsBackend, GenericCompositorBackend,
-auto-detection, error handling, and window state changes.
-"""
+"""Tests for compositors abstraction layer and window_control MCP tool."""
 
 from __future__ import annotations
 
@@ -18,11 +14,16 @@ from wayland_computer_use_mcp.compositors import (
     WindowGeometry,
     WlrootsBackend,
     activate_and_raise_window,
+    ensure_portal_dialogs_above,
     get_compositor_backend,
+    get_display_scale,
     query_window_geometry,
     reset_compositor_backend,
     set_window_state,
 )
+from wayland_computer_use_mcp.compositors.base import CompositorBackend, DisplayInfo
+from wayland_computer_use_mcp.portal import global_portal_session
+from wayland_computer_use_mcp.server import window_control
 
 
 @pytest.fixture(autouse=True)
@@ -33,7 +34,7 @@ def reset_backend():
 
 
 @pytest.mark.asyncio
-async def test_generic_compositor_backend():
+async def test_generic_and_protocol_stubs():
     backend = GenericCompositorBackend()
     assert backend.name == "generic"
     assert await backend.is_available() is True
@@ -42,201 +43,181 @@ async def test_generic_compositor_backend():
     assert await backend.set_window_state(123, "minimize") is False
     assert await backend.ensure_dialogs_above() is False
     displays = await backend.get_active_displays()
-    assert len(displays) == 1
-    assert displays[0].width == 1920
+    assert len(displays) == 1 and displays[0].width == 1920
+
+    assert await CompositorBackend.is_available(None) is None
+    assert await CompositorBackend.get_window_geometry(None) is None
+    assert await CompositorBackend.activate_and_raise_window(None) is None
+    assert await CompositorBackend.get_active_displays(None) is None
+    assert await CompositorBackend.set_window_state(None, 1, "minimize") is None
+    assert await CompositorBackend.ensure_dialogs_above(None) is None
 
 
 @pytest.mark.asyncio
-async def test_kwin_backend_available_and_geometry():
+async def test_kwin_backend_and_read_only_geometry():
     backend = KWinBackend()
-    with patch.dict("os.environ", {"WAYLAND_DISPLAY": "wayland-0", "XDG_CURRENT_DESKTOP": "KDE"}):
-        mock_bus = AsyncMock()
-        mock_bus.disconnect = MagicMock()
-        mock_bus.unique_name = ":1.99"
-        mock_reply = MagicMock()
-        mock_reply.body = [True]
-        mock_bus.call.return_value = mock_reply
+    written_scripts: list[str] = []
 
-        with patch("wayland_computer_use_mcp.compositors.kwin.MessageBus") as mock_bus_cls:
-            mock_bus_cls.return_value.connect = AsyncMock(return_value=mock_bus)
-            assert await backend.is_available() is True
+    class FakeBus:
+        unique_name = ":1.55"
 
-            # Geometry query with /ReportGeom message simulation
+        def add_message_handler(self, handler):
             from dbus_fast import Message, MessageType
 
-            def fake_add_handler(handler):
-                fake_msg = Message(
+            handler(
+                Message(
                     message_type=MessageType.METHOD_CALL,
-                    destination=":1.99",
+                    destination=":1.55",
                     path="/ReportGeom",
                     interface="org.wayland.Mcp",
                     member="Report",
                     signature="iiii",
-                    body=[100, 200, 800, 600],
+                    body=[10, 20, 400, 300],
                     serial=1,
                 )
-                handler(fake_msg)
+            )
 
-            mock_bus.add_message_handler = fake_add_handler
-            mock_load_reply = MagicMock(body=[1])
-            mock_bus.call = AsyncMock(return_value=mock_load_reply)
-            mock_bus.send = MagicMock()
+        async def call(self, msg):
+            if msg.member == "loadScript":
+                with open(msg.body[0], "r", encoding="utf-8") as fh:
+                    written_scripts.append(fh.read())
+            return MagicMock(body=[1])
 
-            geom = await backend.get_window_geometry(pid=1234)
-            assert geom == WindowGeometry(100, 200, 800, 600)
-            assert await backend.activate_and_raise_window(pid=1234) is True
+        def send(self, _msg):
+            pass
 
-            # Window state control
-            assert await backend.set_window_state(1234, "minimize") is True
+        def disconnect(self):
+            pass
 
-            # Dialogs above
-            assert await backend.ensure_dialogs_above() is True
-
-
-@pytest.mark.asyncio
-async def test_gnome_backend_unavailability():
-    backend = GnomeBackend()
-    with patch.dict("os.environ", {}, clear=True):
-        assert await backend.is_available() is False
-
-    with patch.dict("os.environ", {"WAYLAND_DISPLAY": "wayland-0", "XDG_CURRENT_DESKTOP": "KDE"}):
-        assert await backend.is_available() is False
-
-
-@pytest.mark.asyncio
-async def test_gnome_backend_window_geometry():
-    backend = GnomeBackend()
-    mock_bus = AsyncMock()
-    mock_bus.disconnect = MagicMock()
-    mock_reply = MagicMock()
-
-    # GNOME Shell Introspect GetWindows returns {id: {pid, title, rect}}
-    mock_reply.body = [
-        {
-            1001: {
-                "pid": 5555,
-                "title": "Test Application",
-                "rect": [120, 150, 800, 600],
-            }
-        }
-    ]
-    mock_bus.call.return_value = mock_reply
-
-    with patch("wayland_computer_use_mcp.compositors.gnome.MessageBus") as mock_bus_cls:
-        mock_bus_cls.return_value.connect = AsyncMock(return_value=mock_bus)
-
-        geom = await backend.get_window_geometry(pid=5555)
-        assert geom is not None
-        assert geom.x == 120
-        assert geom.y == 150
-        assert geom.width == 800
-        assert geom.height == 600
-
-        # Query by title
-        geom_by_title = await backend.get_window_geometry(title="Test Application")
-        assert geom_by_title is not None
-        assert geom_by_title.width == 800
-
-        # Query non-matching PID
-        assert await backend.get_window_geometry(pid=9999) is None
-
-        # Activation
-        assert await backend.activate_and_raise_window(pid=5555) is True
-        assert await backend.set_window_state(5555, "minimize") is False
+    with (
+        patch.dict("os.environ", {"WAYLAND_DISPLAY": "wayland-0", "XDG_CURRENT_DESKTOP": "KDE"}),
+        patch("wayland_computer_use_mcp.compositors.kwin.MessageBus") as mock_bus_cls,
+    ):
+        mock_bus_cls.return_value.connect = AsyncMock(return_value=FakeBus())
+        assert await backend.is_available() is True
+        geom = await backend.get_window_geometry(pid=1234)
+        assert geom == WindowGeometry(10, 20, 400, 300)
+        assert "keepAbove" not in written_scripts[0] and "activeWindow" not in written_scripts[0]
+        assert await backend.activate_and_raise_window(pid=1234) is True
+        assert "workspace.activeWindow" in written_scripts[1]
+        assert await backend.set_window_state(1234, "minimize") is True
         assert await backend.ensure_dialogs_above() is True
 
 
 @pytest.mark.asyncio
-async def test_wlroots_backend_hyprland():
-    backend = WlrootsBackend()
-    with patch.dict(
-        "os.environ",
-        {"WAYLAND_DISPLAY": "wayland-0", "HYPRLAND_INSTANCE_SIGNATURE": "dummy_sig"},
-    ):
-        with patch("shutil.which", return_value="/usr/bin/hyprctl"):
-            assert await backend.is_available() is True
+async def test_gnome_backend_variants_and_errors():
+    backend = GnomeBackend()
+    with patch.dict("os.environ", {}, clear=True):
+        assert await backend.is_available() is False
+    with patch.dict("os.environ", {"WAYLAND_DISPLAY": "wayland-0", "XDG_CURRENT_DESKTOP": "KDE"}):
+        assert await backend.is_available() is False
 
-            mock_clients = [
-                {
-                    "pid": 7777,
-                    "title": "Hyprland Target",
-                    "at": [50, 60],
-                    "size": [1024, 768],
+    from dbus_fast import MessageType, Variant
+
+    mock_bus = AsyncMock()
+    mock_bus.disconnect = MagicMock()
+    flat_reply = MagicMock(
+        message_type=MessageType.METHOD_RETURN,
+        body=[
+            {
+                2001: {
+                    "pid": Variant("u", 7777),
+                    "title": Variant("s", "Wayland MCP Test Rig"),
+                    "x": Variant("i", 280),
+                    "y": Variant("i", 96),
+                    "width": Variant("u", 720),
+                    "height": Variant("u", 640),
                 }
-            ]
-            mock_proc = MagicMock(returncode=0, stdout=json.dumps(mock_clients))
-            with patch("subprocess.run", return_value=mock_proc) as mock_run:
-                geom = await backend.get_window_geometry(pid=7777)
-                assert geom == WindowGeometry(50, 60, 1024, 768)
-
-                # Focus
-                assert await backend.activate_and_raise_window(pid=7777) is True
-                assert mock_run.called
-
-                # Close & Maximize
-                assert await backend.set_window_state(7777, "close") is True
-                assert await backend.set_window_state(7777, "maximize") is True
-
-            mock_monitors = [
-                {
-                    "id": 0,
-                    "name": "DP-1",
-                    "x": 0,
-                    "y": 0,
-                    "width": 2560,
-                    "height": 1440,
-                    "focused": True,
-                }
-            ]
-            mon_proc = MagicMock(returncode=0, stdout=json.dumps(mock_monitors))
-            with patch("subprocess.run", return_value=mon_proc):
-                displays = await backend.get_active_displays()
-                assert len(displays) == 1
-                assert displays[0].width == 2560
-
-
-@pytest.mark.asyncio
-async def test_wlroots_backend_sway():
-    backend = WlrootsBackend()
-    with patch.dict("os.environ", {"WAYLAND_DISPLAY": "wayland-0", "SWAYSOCK": "/tmp/sway.sock"}):
-        with patch("shutil.which", return_value="/usr/bin/swaymsg"):
-            assert await backend.is_available() is True
-
-            mock_tree = {
-                "nodes": [
-                    {
-                        "pid": 8888,
-                        "name": "Sway Target",
-                        "rect": {"x": 10, "y": 20, "width": 640, "height": 480},
-                    }
-                ]
             }
-            mock_proc = MagicMock(returncode=0, stdout=json.dumps(mock_tree))
-            with patch("subprocess.run", return_value=mock_proc):
-                geom = await backend.get_window_geometry(pid=8888)
-                assert geom == WindowGeometry(10, 20, 640, 480)
-                assert await backend.activate_and_raise_window(pid=8888) is True
-                assert await backend.set_window_state(8888, "maximize") is True
-                assert await backend.set_window_state(8888, "close") is True
+        ],
+    )
+    mock_bus.call.return_value = flat_reply
 
-            mock_outputs = [
+    with patch("wayland_computer_use_mcp.compositors.gnome.MessageBus") as mock_bus_cls:
+        mock_bus_cls.return_value.connect = AsyncMock(return_value=mock_bus)
+        assert (await backend.get_window_geometry(pid=7777)).tuple == (280, 96, 720, 640)
+        assert (await backend.get_window_geometry(title="Wayland MCP Test Rig")).width == 720
+        assert await backend.get_window_geometry(pid=9999) is None
+
+        mock_bus.call.return_value = MagicMock(
+            message_type=MessageType.METHOD_RETURN,
+            body=[
                 {
-                    "name": "eDP-1",
-                    "active": True,
-                    "focused": True,
-                    "rect": {"x": 0, "y": 0, "width": 1920, "height": 1200},
+                    2002: {
+                        "pid": Variant("u", 8888),
+                        "title": Variant("s", "Other"),
+                        "rect": Variant("(iiii)", (10, 40, 500, 400)),
+                    }
                 }
-            ]
-            out_proc = MagicMock(returncode=0, stdout=json.dumps(mock_outputs))
-            with patch("subprocess.run", return_value=out_proc):
-                displays = await backend.get_active_displays()
-                assert len(displays) == 1
-                assert displays[0].height == 1200
+            ],
+        )
+        assert (await backend.get_window_geometry(pid=8888)).tuple == (10, 40, 500, 400)
+
+        assert await backend.activate_and_raise_window(pid=8888) is True
+        assert await backend.set_window_state(8888, "minimize") is False
+        assert await backend.ensure_dialogs_above() is True
+
+        mock_bus.call.return_value = MagicMock(
+            message_type=MessageType.ERROR, body=["AccessDenied"]
+        )
+        assert await backend.get_window_geometry(pid=7777) is None
 
 
 @pytest.mark.asyncio
-async def test_compositor_factory_selection():
-    # If all unavailable, falls back to generic
+async def test_wlroots_backend_hyprland_and_sway():
+    backend = WlrootsBackend()
+    with (
+        patch.dict(
+            "os.environ", {"WAYLAND_DISPLAY": "wayland-0", "HYPRLAND_INSTANCE_SIGNATURE": "sig"}
+        ),
+        patch("shutil.which", return_value="/usr/bin/hyprctl"),
+    ):
+        assert await backend.is_available() is True
+        clients = [{"pid": 7777, "title": "Hyprland Target", "at": [50, 60], "size": [1024, 768]}]
+        with patch(
+            "subprocess.run", return_value=MagicMock(returncode=0, stdout=json.dumps(clients))
+        ):
+            assert await backend.get_window_geometry(pid=7777) == WindowGeometry(50, 60, 1024, 768)
+            assert await backend.activate_and_raise_window(pid=7777) is True
+            assert await backend.set_window_state(7777, "close") is True
+            assert await backend.set_window_state(7777, "maximize") is True
+
+        mons = [
+            {
+                "id": 0,
+                "name": "DP-1",
+                "x": 0,
+                "y": 0,
+                "width": 2560,
+                "height": 1440,
+                "focused": True,
+            }
+        ]
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=json.dumps(mons))):
+            assert (await backend.get_active_displays())[0].width == 2560
+
+    with (
+        patch.dict("os.environ", {"WAYLAND_DISPLAY": "wayland-0", "SWAYSOCK": "/tmp/sway.sock"}),
+        patch("shutil.which", return_value="/usr/bin/swaymsg"),
+    ):
+        assert await backend.is_available() is True
+        tree = {
+            "nodes": [
+                {
+                    "pid": 8888,
+                    "name": "Sway Target",
+                    "rect": {"x": 10, "y": 20, "width": 640, "height": 480},
+                }
+            ]
+        }
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=json.dumps(tree))):
+            assert await backend.get_window_geometry(pid=8888) == WindowGeometry(10, 20, 640, 480)
+            assert await backend.set_window_state(8888, "maximize") is True
+            assert await backend.set_window_state(8888, "close") is True
+
+
+@pytest.mark.asyncio
+async def test_compositor_factory_sync_wrappers_and_display_scale():
     with (
         patch(
             "wayland_computer_use_mcp.compositors.kwin.KWinBackend.is_available",
@@ -251,17 +232,15 @@ async def test_compositor_factory_selection():
             AsyncMock(return_value=False),
         ),
     ):
-        backend = await get_compositor_backend()
-        assert backend.name == "generic"
+        assert (await get_compositor_backend()).name == "generic"
 
-
-def test_sync_wrappers():
     mock_backend = AsyncMock()
     mock_backend.get_window_geometry.return_value = WindowGeometry(10, 20, 300, 400)
     mock_backend.activate_and_raise_window.return_value = True
     mock_backend.set_window_state.return_value = True
-    mock_backend.ensure_dialogs_above.return_value = True
-
+    mock_backend.get_active_displays.return_value = [
+        DisplayInfo(name="DP-1", x=0, y=0, width=1920, height=1080, scale=1.5)
+    ]
     with patch(
         "wayland_computer_use_mcp.compositors.get_compositor_backend",
         AsyncMock(return_value=mock_backend),
@@ -269,112 +248,35 @@ def test_sync_wrappers():
         assert query_window_geometry(123) == (10, 20, 300, 400)
         assert activate_and_raise_window(123) is True
         assert set_window_state(123, "minimize") is True
-        assert set_window_state(123, "restore") is True
-        assert set_window_state(123, "maximize") is True
+        assert get_display_scale(100, 100) == 1.5
+
+    with patch.dict("os.environ", {}, clear=True):
+        assert query_window_geometry(123) is None
+
+    with patch("wayland_computer_use_mcp.compositors._run_async_sync", return_value=True):
+        assert ensure_portal_dialogs_above() is True
+        assert set_window_state(9876, "restore") is True
 
 
-@pytest.mark.asyncio
-async def test_gnome_backend_available_with_owner():
-    """Verifies GnomeBackend reports available when session bus confirms Introspect owner."""
-    backend = GnomeBackend()
-    mock_bus = AsyncMock()
-    mock_bus.disconnect = MagicMock()
-    mock_reply = MagicMock(body=[True])
-    mock_bus.call.return_value = mock_reply
+def test_window_control_tool(monkeypatch):
+    global_portal_session.target_pid = None
+    with pytest.raises(RuntimeError, match="No active application PID"):
+        window_control(action="minimize")
+    with pytest.raises(ValueError, match="Invalid window action"):
+        window_control(action="explode", pid=12345)
 
-    with patch.dict(
-        "os.environ",
-        {"WAYLAND_DISPLAY": "wayland-0", "XDG_CURRENT_DESKTOP": "GNOME"},
-    ):
-        with patch("wayland_computer_use_mcp.compositors.gnome.MessageBus") as mock_bus_cls:
-            mock_bus_cls.return_value.connect = AsyncMock(return_value=mock_bus)
-            assert await backend.is_available() is True
+    dispatched: list[tuple[int, str]] = []
+    activated: list[int] = []
+    fake_driver = MagicMock()
+    fake_driver.set_window_state.side_effect = lambda p, s: dispatched.append((p, s)) or True
+    fake_driver.activate_window.side_effect = lambda pid=None, **kw: activated.append(pid) or True
+    monkeypatch.setattr(global_portal_session, "active_driver", lambda: fake_driver)
 
+    for act in ("minimize", "maximize", "restore", "close"):
+        assert window_control(action=act, pid=42)["success"] is True
+        assert (42, act) in dispatched
+    assert window_control(action="focus", pid=42)["success"] is True and 42 in activated
 
-@pytest.mark.asyncio
-async def test_compositor_displays_and_dialogs():
-    """Verifies get_active_displays and dialog handling across backends."""
-    kwin = KWinBackend()
-    displays = await kwin.get_active_displays()
-    assert len(displays) >= 1
-    assert displays[0].width > 0
-
-    gnome = GnomeBackend()
-    g_displays = await gnome.get_active_displays()
-    assert len(g_displays) >= 1
-    assert g_displays[0].name == "Primary"
-
-    wlroots = WlrootsBackend()
-    w_displays = await wlroots.get_active_displays()
-    assert len(w_displays) >= 1
-    assert await wlroots.ensure_dialogs_above() is True
-
-
-@pytest.mark.asyncio
-async def test_compositor_protocol_stubs():
-    """Verifies default Protocol method execution."""
-    from wayland_computer_use_mcp.compositors.base import CompositorBackend
-
-    assert await CompositorBackend.is_available(None) is None
-    assert await CompositorBackend.get_window_geometry(None) is None
-    assert await CompositorBackend.activate_and_raise_window(None) is None
-    assert await CompositorBackend.get_active_displays(None) is None
-    assert await CompositorBackend.set_window_state(None, 1, "minimize") is None
-    assert await CompositorBackend.ensure_dialogs_above(None) is None
-
-
-@pytest.mark.asyncio
-async def test_gnome_backend_unwraps_dbus_variants_and_handles_error():
-    """GnomeBackend must unwrap dbus_fast Variants for rect, flat keys, and handle D-Bus errors."""
-    from dbus_fast import MessageType, Variant
-
-    backend = GnomeBackend()
-    mock_bus = AsyncMock()
-    mock_bus.disconnect = MagicMock()
-
-    # 1. Variant-wrapped flat geometry keys (x, y, width, height)
-    flat_reply = MagicMock()
-    flat_reply.message_type = MessageType.METHOD_RETURN
-    flat_reply.body = [
-        {
-            2001: {
-                "pid": Variant("u", 7777),
-                "title": Variant("s", "Wayland MCP Test Rig"),
-                "x": Variant("i", 280),
-                "y": Variant("i", 96),
-                "width": Variant("u", 720),
-                "height": Variant("u", 640),
-            }
-        }
-    ]
-    mock_bus.call.return_value = flat_reply
-
-    with patch("wayland_computer_use_mcp.compositors.gnome.MessageBus") as mock_bus_cls:
-        mock_bus_cls.return_value.connect = AsyncMock(return_value=mock_bus)
-        geom = await backend.get_window_geometry(pid=7777)
-        assert geom is not None
-        assert geom.tuple == (280, 96, 720, 640)
-
-        # 2. Variant-wrapped rect array
-        rect_reply = MagicMock()
-        rect_reply.message_type = MessageType.METHOD_RETURN
-        rect_reply.body = [
-            {
-                2002: {
-                    "pid": Variant("u", 8888),
-                    "title": Variant("s", "Other"),
-                    "rect": Variant("(iiii)", (10, 40, 500, 400)),
-                }
-            }
-        ]
-        mock_bus.call.return_value = rect_reply
-        geom_rect = await backend.get_window_geometry(pid=8888)
-        assert geom_rect is not None
-        assert geom_rect.tuple == (10, 40, 500, 400)
-
-        # 3. AccessDenied / MessageType.ERROR returns None gracefully
-        err_reply = MagicMock()
-        err_reply.message_type = MessageType.ERROR
-        err_reply.body = ["App introspection is disabled"]
-        mock_bus.call.return_value = err_reply
-        assert await backend.get_window_geometry(pid=7777) is None
+    global_portal_session.target_pid = 7890
+    assert window_control(action="minimize")["pid"] == 7890
+    assert (7890, "minimize") in dispatched

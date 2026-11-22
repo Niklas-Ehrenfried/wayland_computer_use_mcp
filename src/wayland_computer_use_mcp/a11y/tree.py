@@ -13,14 +13,22 @@ logger = logging.getLogger(__name__)
 
 # In-memory node cache: pid -> {node_id -> node_dict}
 _node_cache: dict[int, dict[str, dict[str, Any]]] = collections.defaultdict(dict)
+_tree_generations: dict[int, int] = collections.defaultdict(int)
+
+
+def get_tree_generation(pid: int) -> int:
+    """Returns the monotonic UI tree inspection generation counter for ``pid``."""
+    return _tree_generations.get(pid, 0)
 
 
 def clear_node_cache(pid: int | None = None) -> None:
     """Clears cached node mapping for a specific PID or all PIDs."""
     if pid is not None:
         _node_cache.pop(pid, None)
+        _tree_generations.pop(pid, None)
     else:
         _node_cache.clear()
+        _tree_generations.clear()
 
 
 def get_cached_node(pid: int, node_id: str) -> dict[str, Any] | None:
@@ -81,6 +89,10 @@ def _flatten_tree_with_map(
 
     if pid is not None and pid >= 0:
         _node_cache[pid].clear()
+        _tree_generations[pid] += 1
+        current_gen = _tree_generations[pid]
+    else:
+        current_gen = 0
 
     def _traverse(node: dict[str, Any], ancestors: list[dict[str, Any]] | None = None) -> None:
         if not node or not isinstance(node, dict):
@@ -173,6 +185,7 @@ def _flatten_tree_with_map(
                     "id": node_id,
                     "center": center,
                     "bounds": bounds,
+                    "tree_generation": current_gen,
                     "ancestors": [
                         {
                             "bus_name": a.get("bus_name"),
@@ -270,6 +283,47 @@ def build_compact_hierarchy(
     return nodes[0] if nodes else {"role": str(tree.get("role", "application")).lower()}
 
 
+def extract_active_window_node(tree: dict[str, Any]) -> dict[str, Any] | None:
+    """Returns the best active top-level window/dialog node, prioritizing open modal dialogs."""
+    candidates: list[dict[str, Any]] = []
+
+    def _scan(node: dict[str, Any], depth: int) -> None:
+        if depth > 2 or not isinstance(node, dict):
+            return
+        role = str(node.get("role", "")).lower()
+        if role in ("dialog", "window", "frame"):
+            candidates.append(node)
+        for ch in node.get("children", []):
+            _scan(ch, depth + 1)
+
+    for child in tree.get("children", []):
+        _scan(child, 0)
+
+    if not candidates:
+        return None
+
+    dialogs = [c for c in candidates if str(c.get("role", "")).lower() == "dialog"]
+    if dialogs:
+        for d in reversed(dialogs):
+            states = set(d.get("states", []))
+            if "focused" in states or "active" in states:
+                return d
+        for d in reversed(dialogs):
+            states = set(d.get("states", []))
+            if "showing" in states or "visible" in states or not states:
+                return d
+        return dialogs[-1]
+
+    for c in candidates:
+        states = set(c.get("states", []))
+        if "focused" in states or "active" in states:
+            return c
+    for c in candidates:
+        if str(c.get("name", "")).strip():
+            return c
+    return candidates[0]
+
+
 def get_application_tree(pid: int, max_depth: int = 24) -> dict[str, Any]:
     """Synchronous entry point to retrieve pruned AT-SPI UI tree for a given PID."""
     from wayland_computer_use_mcp.a11y.client import run_atspi_sync
@@ -280,4 +334,6 @@ def get_application_tree(pid: int, max_depth: int = 24) -> dict[str, Any]:
     elements, node_elem_map = _flatten_tree_with_map(tree, pid=pid)
     tree["interactive_elements"] = elements
     tree["hierarchy"] = build_compact_hierarchy(tree, node_elem_map=node_elem_map)
+    if pid is not None and pid >= 0:
+        tree["tree_generation"] = get_tree_generation(pid)
     return tree

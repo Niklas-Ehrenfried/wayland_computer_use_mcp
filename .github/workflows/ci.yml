@@ -9,6 +9,10 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: [ "3.11", "3.12" ]
     steps:
       - uses: actions/checkout@v4
 
@@ -18,8 +22,8 @@ jobs:
           enable-cache: true
           version: "latest"
 
-      - name: Set up Python
-        run: uv python install 3.11
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
 
       - name: Install system dependencies for headless tests
         run: |
@@ -39,17 +43,153 @@ jobs:
         run: uv sync --all-extras --dev
 
       - name: Run Ruff Linter
+        if: matrix.python-version == '3.11'
         run: uv run ruff check .
 
       - name: Run Ruff Formatter Check
+        if: matrix.python-version == '3.11'
         run: uv run ruff format --check .
 
       - name: Run Unit Tests (Mock & Non-live)
         run: uv run pytest -m "not live" -v --tb=short
 
-      - name: Build Distribution Packages
-        run: uv build
+      - name: Build & Validate Distribution Packages
+        if: matrix.python-version == '3.11'
+        run: |
+          uv build
+          uvx twine check dist/*
 
-      - name: Validate Distribution Artifacts
-        run: uvx twine check dist/*
+  live-blackbox:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compositor: [ labwc, sway ]
+    steps:
+      - uses: actions/checkout@v4
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          version: "latest"
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install headless ${{ matrix.compositor }} and GTK4/AT-SPI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ${{ matrix.compositor }} \
+            pkg-config \
+            libcairo2-dev \
+            libgirepository-2.0-dev \
+            libgirepository1.0-dev \
+            gir1.2-glib-2.0 \
+            gir1.2-gtk-4.0 \
+            gir1.2-adw-1 \
+            libgl1-mesa-dri \
+            dbus-x11 \
+            at-spi2-core
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Run Live Blackbox Suite (${{ matrix.compositor }} headless)
+        env:
+          WAYLAND_MCP_VIRTUAL_CMD: ${{ matrix.compositor }}
+          WLR_BACKENDS: headless
+          WLR_RENDERER: pixman
+          WLR_LIBINPUT_NO_DEVICES: "1"
+        run: uv run pytest tests/test_virtual_session.py tests/test_live_example_app.py -v --tb=short --no-cov
+
+  live-blackbox-distros:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: debian-trixie
+            image: debian:trixie
+          - distro: fedora
+            image: fedora:latest
+          - distro: archlinux
+            image: archlinux:latest
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Install base container & GTK4/labwc dependencies (${{ matrix.distro }})
+        run: |
+          if [ "${{ matrix.distro }}" = "debian-trixie" ]; then
+            DEBIAN_FRONTEND=noninteractive apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              labwc gcc pkg-config libcairo2-dev libgirepository-2.0-dev \
+              gir1.2-glib-2.0 gir1.2-gtk-4.0 gir1.2-adw-1 libgl1-mesa-dri \
+              dbus-x11 at-spi2-core git ca-certificates curl tar
+          elif [ "${{ matrix.distro }}" = "fedora" ]; then
+            dnf install -y \
+              labwc gcc pkgconf-pkg-config cairo-devel gobject-introspection-devel \
+              gtk4 libadwaita mesa-dri-drivers dbus-daemon at-spi2-core \
+              git ca-certificates curl tar
+          elif [ "${{ matrix.distro }}" = "archlinux" ]; then
+            pacman -Syu --noconfirm \
+              labwc gcc pkgconf cairo gobject-introspection gtk4 libadwaita \
+              mesa dbus at-spi2-core git ca-certificates curl tar
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: false
+          version: "latest"
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Run Live Blackbox Suite on ${{ matrix.distro }} (labwc headless)
+        env:
+          WAYLAND_MCP_VIRTUAL_CMD: labwc
+          WLR_BACKENDS: headless
+          WLR_RENDERER: pixman
+          WLR_LIBINPUT_NO_DEVICES: "1"
+        run: uv run pytest tests/test_virtual_session.py tests/test_live_example_app.py -v --tb=short --no-cov
+
+  live-blackbox-kubuntu-kwin:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    container:
+      image: ubuntu:rolling
+    steps:
+      - name: Install KWin Plasma 6 & GTK4/AT-SPI dependencies (Kubuntu rolling)
+        run: |
+          DEBIAN_FRONTEND=noninteractive apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            kwin-wayland libei1 qt6-wayland gcc pkg-config libcairo2-dev \
+            libgirepository-2.0-dev gir1.2-glib-2.0 gir1.2-gtk-4.0 gir1.2-adw-1 \
+            libgl1-mesa-dri dbus-x11 at-spi2-core git ca-certificates curl tar
+
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: false
+          version: "latest"
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Run Live Blackbox Suite on Kubuntu Rolling (kwin_wayland headless)
+        env:
+          WAYLAND_MCP_VIRTUAL_CMD: kwin_wayland
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: uv run pytest tests/test_virtual_session.py tests/test_live_example_app.py -v --tb=short --no-cov

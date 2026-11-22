@@ -35,9 +35,11 @@ from wayland_computer_use_mcp.a11y.tree import (
     _node_cache,
     build_compact_hierarchy,
     clear_node_cache,
+    extract_active_window_node,
     flatten_tree,
     get_application_tree,
     get_cached_node,
+    get_tree_generation,
 )
 
 __all__ = [
@@ -55,9 +57,11 @@ __all__ = [
     "do_accessible_action",
     "do_accessible_set_text",
     "do_accessible_text_action",
+    "extract_active_window_node",
     "flatten_tree",
     "get_application_tree",
     "get_cached_node",
+    "get_tree_generation",
     "global_event_listener",
     "invoke_node_action",
     "perform_accessible_action",

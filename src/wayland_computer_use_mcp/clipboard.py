@@ -88,7 +88,8 @@ def write_system_clipboard(text: str) -> bool:
     if shutil.which("wl-copy"):
         try:
             subprocess.run(
-                ["wl-copy", text],
+                ["wl-copy"],
+                input=text.encode("utf-8"),
                 env=env,
                 check=True,
                 stdout=subprocess.DEVNULL,

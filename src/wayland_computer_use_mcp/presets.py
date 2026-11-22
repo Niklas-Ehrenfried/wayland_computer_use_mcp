@@ -17,6 +17,7 @@ from wayland_computer_use_mcp.artifacts import get_artifacts_dir
 logger = logging.getLogger("wayland_computer_use_mcp.presets")
 
 _NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_\-]+$")
+_POSITIONAL_ID_RE = re.compile(r"^(?:b|e|c|s|t|k|r|m|l|lbl|sb|sw|li|ti|cell|scr|w)\d+$")
 
 
 def _sanitize_name(name: str) -> str:
@@ -72,17 +73,44 @@ def save_preset(
     steps: list[dict[str, Any]],
     description: str | None = None,
     target_app: str | None = None,
+    pid: int | None = None,
 ) -> dict[str, Any]:
     """Saves or updates an interaction workflow preset."""
+    from wayland_computer_use_mcp.a11y import _node_cache
+    from wayland_computer_use_mcp.portal import global_portal_session
+
     clean_name = _sanitize_name(name)
     if not isinstance(steps, list) or not steps:
         raise ValueError("Preset must contain a non-empty list of action 'steps'.")
+
+    effective_pid = pid if pid is not None else global_portal_session.target_pid
+    pid_cache = _node_cache.get(effective_pid, {}) if effective_pid is not None else {}
+    normalized_steps: list[dict[str, Any]] = []
+    normalized_count = 0
+    warnings: list[str] = []
 
     for idx, step in enumerate(steps, start=1):
         if not isinstance(step, dict) or "action" not in step:
             raise ValueError(
                 f"Step {idx} must be a dictionary containing at least an 'action' key."
             )
+        clean_step = dict(step)
+        raw_target = clean_step.get("target") or clean_step.get("node_id")
+        if isinstance(raw_target, str) and _POSITIONAL_ID_RE.match(raw_target):
+            cached = pid_cache.get(raw_target)
+            cached_name = str(cached.get("name", "")).strip() if cached else ""
+            if cached and cached_name:
+                clean_step["target"] = cached_name
+                if not clean_step.get("role") and cached.get("role"):
+                    clean_step["role"] = str(cached["role"])
+                clean_step.pop("node_id", None)
+                normalized_count += 1
+            else:
+                warnings.append(
+                    f"Step {idx} uses positional ID '{raw_target}' instead of a semantic label; "
+                    "consider replacing with {'target': '<label>', 'role': '<role>'}."
+                )
+        normalized_steps.append(clean_step)
 
     preset_path = get_artifacts_dir("presets") / f"{clean_name}.json"
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -91,20 +119,25 @@ def save_preset(
         "name": clean_name,
         "description": description or f"Preset macro for {clean_name}",
         "target_app": target_app,
-        "steps": steps,
+        "steps": normalized_steps,
         "updated_at": now_iso,
     }
 
     with open(preset_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 
-    return {
+    result: dict[str, Any] = {
         "status": "saved",
         "name": clean_name,
         "file_path": str(preset_path),
-        "steps_count": len(steps),
+        "steps_count": len(normalized_steps),
         "updated_at": now_iso,
     }
+    if normalized_count > 0:
+        result["normalized_steps"] = normalized_count
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 def delete_preset(name: str) -> dict[str, Any]:
