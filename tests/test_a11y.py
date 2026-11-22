@@ -559,5 +559,60 @@ async def test_get_application_tree_matches_descendant_pid(monkeypatch):
     assert tree["name"] == "WrappedApp"
 
 
+async def test_get_application_tree_merges_multiprocess_child_app(monkeypatch):
+    """Multi-process apps (e.g. WebKitWebProcess) merge descendant AT-SPI trees."""
+    from dbus_fast import MessageType
+
+    from wayland_computer_use_mcp.a11y.client import AtspiInspector
+    from wayland_computer_use_mcp.config import get_config
+
+    monkeypatch.setattr(get_config(), "mock_mode", False)
+    inspector = AtspiInspector(bus_address="unix:path=/tmp/fake-atspi")
+
+    class FakeBus:
+        async def call(self, msg):
+            reply = MagicMock()
+            reply.message_type = MessageType.METHOD_RETURN
+            if msg.member == "GetChildren":
+                reply.body = [
+                    [
+                        [":1.80", "/org/a11y/atspi/accessible/root"],
+                        [":1.81", "/org/a11y/atspi/accessible/root"],
+                    ]
+                ]
+            elif msg.member == "GetConnectionUnixProcessID":
+                reply.body = [99100 if msg.body[0] == ":1.80" else 99101]
+            else:
+                reply.body = []
+            return reply
+
+    inspector.bus = FakeBus()  # type: ignore[assignment]
+    monkeypatch.setattr(inspector, "connect", lambda: _async_return(True))
+    monkeypatch.setattr(inspector, "close", lambda: _async_return(None))
+    monkeypatch.setattr(
+        "wayland_computer_use_mcp.a11y.client._collect_process_tree_pids",
+        lambda pid: {99100, 99101} if pid == 99100 else {pid},
+    )
+
+    async def fake_cache(bus_name, root_path, max_depth):
+        if bus_name == ":1.80":
+            return {
+                "role": "application",
+                "name": "ShellApp",
+                "children": [{"role": "frame", "name": "MainWindow", "children": []}],
+            }
+        return {
+            "role": "application",
+            "name": "WebProcess",
+            "children": [{"role": "push button", "name": "Apply Query", "children": []}],
+        }
+
+    monkeypatch.setattr(inspector, "_fetch_tree_from_cache", fake_cache)
+
+    tree = await inspector.get_application_tree(99100)
+    names = [c["name"] for c in tree["children"]]
+    assert "MainWindow" in names and "Apply Query" in names
+
+
 async def _async_return(val):
     return val

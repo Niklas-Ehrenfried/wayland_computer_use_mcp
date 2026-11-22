@@ -8,6 +8,7 @@ import sys
 
 if os.environ.get("WLR_RENDERER") == "pixman" or os.environ.get("LIBGL_ALWAYS_SOFTWARE") == "1":
     os.environ.setdefault("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
+    os.environ.setdefault("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
     os.environ.setdefault("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1")
 
 import gi
@@ -40,7 +41,11 @@ def on_activate(app: Gtk.Application) -> None:
     view = WebKit.WebView()
     settings = view.get_settings()
     settings.set_enable_javascript(True)
-    view.load_html(HTML_DOC, "http://localhost/")
+    view.connect(
+        "load-changed",
+        lambda _v, ev: print(f"[WebKitRig] load-changed {int(ev)}", flush=True),
+    )
+    view.load_html(HTML_DOC, None)
 
     win.set_child(view)
     win.present()

@@ -60,6 +60,21 @@ def _find_python_for_modules(*modules: str) -> str | None:
     return None
 
 
+def _is_pid_running(pid: int) -> bool:
+    """Returns True only if pid exists and is not an unreaped zombie/dead task."""
+    status_path = Path(f"/proc/{pid}/status")
+    if not status_path.exists():
+        return False
+    try:
+        for line in status_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.startswith("State:"):
+                state = line.split(":", 1)[1].strip()
+                return not state.startswith(("Z", "X"))
+    except OSError:
+        return False
+    return True
+
+
 def _sample_center_rgb(raw_png: bytes) -> tuple[int, int, int]:
     with Image.open(io.BytesIO(raw_png)) as img:
         rgb = img.convert("RGB")
@@ -181,8 +196,13 @@ def test_webkit_dom_live(blackbox_session: None) -> None:
     assert res["status"] == "launched"
     pid = int(res["pid"])
     try:
-        wait_res = wait_for_element(target="Apply Query", timeout_ms=6000, pid=pid)
-        assert wait_res["matched"] is True
+        wait_res = wait_for_element(target="Apply Query", timeout_ms=10000, pid=pid)
+        if not wait_res["matched"]:
+            elems = inspect_ui_tree(pid=pid).get("interactive_elements", [])
+            logs = get_app_logs(pid=pid, lines=40)
+            raise AssertionError(
+                f"Apply Query not found in WebKit AT-SPI tree; elements={elems}; logs={logs!r}"
+            )
         interact_with_node(target="Apply Query", action="click", pid=pid)
         time.sleep(0.2)
         tree = inspect_ui_tree(pid=pid)
@@ -282,7 +302,7 @@ def test_wrapper_launched_descendant_pid_live(blackbox_session: None) -> None:
 
     time.sleep(0.15)
     for cpid in descendant_pids:
-        assert not Path(f"/proc/{cpid}").exists(), f"Descendant PID {cpid} leaked after terminate"
+        assert not _is_pid_running(cpid), f"Descendant PID {cpid} still running after terminate"
 
 
 def test_chromium_dom_live(blackbox_session: None) -> None:
@@ -326,9 +346,14 @@ def test_chromium_dom_live(blackbox_session: None) -> None:
             wait_res = wait_for_element(target="Go Now", timeout_ms=8000, pid=pid)
             assert wait_res["matched"] is True
 
+            interact_with_node(target="Search Box", action="click", pid=pid)
+            time.sleep(0.15)
             interact_with_node(target="Search Box", action="type", text="wayland-ok", pid=pid)
+            time.sleep(0.15)
             interact_with_node(target="Go Now", action="click", pid=pid)
             updated = wait_for_element(target="Clicked: wayland-ok", timeout_ms=5000, pid=pid)
-            assert updated["matched"] is True
+            if not updated["matched"]:
+                elems = inspect_ui_tree(pid=pid).get("interactive_elements", [])
+                raise AssertionError(f"Expected 'Clicked: wayland-ok', got elements={elems}")
         finally:
             terminate_app(pid)

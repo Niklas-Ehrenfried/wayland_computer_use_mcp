@@ -320,4 +320,10 @@ def test_terminate_kills_wrapper_process_group(monkeypatch):
     time.sleep(0.15)
     assert not is_responsive(pid)
     for cpid in child_pids:
-        assert not Path(f"/proc/{cpid}").exists()
+        status_path = Path(f"/proc/{cpid}/status")
+        if status_path.exists():
+            txt = status_path.read_text(encoding="utf-8", errors="ignore")
+            assert any(
+                ln.startswith("State:") and ln.split(":", 1)[1].strip().startswith(("Z", "X"))
+                for ln in txt.splitlines()
+            )

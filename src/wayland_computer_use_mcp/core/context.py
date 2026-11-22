@@ -59,6 +59,8 @@ class SessionContext:
             env["DBUS_SESSION_BUS_ADDRESS"] = self.dbus_address
         if self.wayland_display:
             env["WAYLAND_DISPLAY"] = self.wayland_display
+            env.setdefault("XDG_SESSION_TYPE", "wayland")
+            env.setdefault("QT_QPA_PLATFORM", "wayland;xcb")
         if self.atspi_bus_address:
             env["AT_SPI_BUS_ADDRESS"] = self.atspi_bus_address
         elif self.is_isolated:

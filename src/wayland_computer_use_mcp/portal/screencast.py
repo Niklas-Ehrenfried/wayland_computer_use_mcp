@@ -164,12 +164,20 @@ def capture_native_desktop_frame() -> Image.Image | None:
             cmd,
             env=run_env,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=3.0,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=8.0,
         )
         if proc.returncode == 0 and os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
             with Image.open(tmp_path) as img:
                 return img.convert("RGB")
+        if proc.returncode != 0:
+            logger.warning(
+                "Native screenshot capture failed with %s (rc=%s): %s",
+                cmd_template[0],
+                proc.returncode,
+                (proc.stderr or "").strip()[:300],
+            )
     except Exception as exc:
         logger.debug("Native screenshot capture failed with %s: %s", cmd_template[0], exc)
     finally:

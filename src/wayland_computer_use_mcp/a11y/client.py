@@ -257,7 +257,6 @@ class AtspiInspector:
                 return _empty_tree("Empty AT-SPI registry")
 
             apps = reply.body[0]
-            matched_app: tuple[str, str] | None = None
             registry_apps: list[tuple[int, str, str]] = []
 
             for app_ref in apps:
@@ -275,48 +274,83 @@ class AtspiInspector:
                     )
                     if pid_reply and pid_reply.body:
                         app_pid = int(pid_reply.body[0])
-                        if app_pid == pid:
-                            matched_app = (bus_name, path)
-                            break
                         registry_apps.append((app_pid, bus_name, path))
                 except Exception:
                     pass
 
-            if not matched_app and registry_apps:
-                descendants = _collect_process_tree_pids(pid)
-                for app_pid, bus_name, path in registry_apps:
-                    if app_pid in descendants:
-                        matched_app = (bus_name, path)
-                        break
+            primary: tuple[str, str] | None = None
+            extra_apps: list[tuple[str, str]] = []
+            exact_matches = [(b, p) for ap, b, p in registry_apps if ap == pid]
+            if exact_matches:
+                primary = exact_matches[0]
 
-            if not matched_app:
+            if registry_apps and (not primary or len(registry_apps) > 1):
+                descendants = _collect_process_tree_pids(pid)
+                for ap, bus_name, path in registry_apps:
+                    if ap not in descendants:
+                        continue
+                    candidate = (bus_name, path)
+                    if primary is None:
+                        primary = candidate
+                    elif candidate != primary:
+                        extra_apps.append(candidate)
+
+            if not primary:
                 logger.debug("No accessible AT-SPI application matched PID %s", pid)
                 return _empty_tree(f"PID {pid} has not exposed an AT-SPI tree yet")
 
-            cached_tree = await self._fetch_tree_from_cache(
-                matched_app[0], matched_app[1], max_depth=max_depth
+            primary_tree = await self._fetch_single_app_tree(
+                primary[0], primary[1], max_depth=max_depth
             )
-            if cached_tree is not None and (cached_tree.get("children") or max_depth <= 0):
-                return cached_tree
-
-            visited: set[tuple[str, str]] = set()
-            sem = asyncio.Semaphore(16)
-            tree = await self._traverse_node(
-                matched_app[0],
-                matched_app[1],
-                current_depth=0,
-                max_depth=max_depth,
-                visited=visited,
-                sem=sem,
-            )
-            pruned = self._prune_tree(tree)
-            return pruned or tree
+            if extra_apps:
+                existing_children = list(primary_tree.get("children", []))
+                for bus_name, path in extra_apps:
+                    try:
+                        extra_tree = await self._fetch_single_app_tree(
+                            bus_name, path, max_depth=max_depth
+                        )
+                        extra_children = extra_tree.get("children", [])
+                        if extra_children:
+                            existing_children.extend(extra_children)
+                        elif extra_tree.get("name"):
+                            existing_children.append(extra_tree)
+                    except Exception as exc:
+                        logger.debug(
+                            "Failed fetching descendant AT-SPI tree %s %s: %s",
+                            bus_name,
+                            path,
+                            exc,
+                        )
+                primary_tree = dict(primary_tree)
+                primary_tree["children"] = existing_children
+            return primary_tree
 
         except Exception as exc:
             logger.debug("Error traversing AT-SPI tree for PID %s: %s", pid, exc)
             return _empty_tree(f"AT-SPI traversal error: {exc}")
         finally:
             await self.close()
+
+    async def _fetch_single_app_tree(
+        self, bus_name: str, root_path: str, max_depth: int
+    ) -> dict[str, Any]:
+        """Fetches and prunes a single AT-SPI application root tree via Cache or traversal."""
+        cached_tree = await self._fetch_tree_from_cache(bus_name, root_path, max_depth=max_depth)
+        if cached_tree is not None and (cached_tree.get("children") or max_depth <= 0):
+            return cached_tree
+
+        visited: set[tuple[str, str]] = set()
+        sem = asyncio.Semaphore(16)
+        tree = await self._traverse_node(
+            bus_name,
+            root_path,
+            current_depth=0,
+            max_depth=max_depth,
+            visited=visited,
+            sem=sem,
+        )
+        pruned = self._prune_tree(tree)
+        return pruned or tree
 
     async def _fetch_tree_from_cache(
         self,
