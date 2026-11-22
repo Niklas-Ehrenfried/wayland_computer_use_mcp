@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal zero-widget GTK4 Cairo canvas app for Level 2/3 coordinate + visual tests."""
+"""Minimal zero-widget GTK4 CSS canvas app for Level 2/3 coordinate + visual tests."""
 
 from __future__ import annotations
 
@@ -8,7 +8,16 @@ import sys
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk  # noqa: E402
+from gi.repository import Gdk, Gtk  # noqa: E402
+
+_CSS = b"""
+.canvas-red {
+    background-color: #dc2626;
+}
+.canvas-green {
+    background-color: #22c55e;
+}
+"""
 
 
 def on_activate(app: Gtk.Application) -> None:
@@ -16,36 +25,32 @@ def on_activate(app: Gtk.Application) -> None:
     win.set_default_size(420, 260)
     win.set_decorated(False)
 
-    state = {"clicked": False}
-    area = Gtk.DrawingArea()
-    area.set_content_width(420)
-    area.set_content_height(260)
+    provider = Gtk.CssProvider()
+    provider.load_from_data(_CSS)
+    display = Gdk.Display.get_default()
+    if display is not None:
+        Gtk.StyleContext.add_provider_for_display(
+            display,
+            provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
 
-    def draw_func(_area: Gtk.DrawingArea, cr: object, width: int, height: int) -> None:
-        cr.set_source_rgb(0.12, 0.14, 0.18)
-        cr.rectangle(0, 0, width, height)
-        cr.fill()
-
-        if state["clicked"]:
-            cr.set_source_rgb(0.15, 0.72, 0.28)
-        else:
-            cr.set_source_rgb(0.86, 0.20, 0.24)
-        cr.rectangle(40, 40, max(40, width - 80), max(40, height - 80))
-        cr.fill()
-
-    area.set_draw_func(draw_func)
+    surface = Gtk.Box()
+    surface.set_hexpand(True)
+    surface.set_vexpand(True)
+    surface.add_css_class("canvas-red")
 
     gesture = Gtk.GestureClick()
 
     def on_pressed(_gesture: Gtk.GestureClick, _n_press: int, x: float, y: float) -> None:
-        state["clicked"] = True
-        area.queue_draw()
+        surface.remove_css_class("canvas-red")
+        surface.add_css_class("canvas-green")
         print(f"[CanvasRig] clicked at ({x:.1f}, {y:.1f})", flush=True)
 
     gesture.connect("pressed", on_pressed)
-    area.add_controller(gesture)
+    surface.add_controller(gesture)
 
-    win.set_child(area)
+    win.set_child(surface)
     win.present()
     print("[CanvasRig] ready", flush=True)
 

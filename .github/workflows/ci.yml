@@ -168,7 +168,7 @@ jobs:
         run: |
           DEBIAN_FRONTEND=noninteractive apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            kwin-wayland libei1 qt6-wayland python3 python3-gi python3-pyqt6 \
+            kwin-wayland kde-spectacle libei1 qt6-wayland python3 python3-gi python3-pyqt6 \
             gir1.2-glib-2.0 gir1.2-gtk-4.0 gir1.2-adw-1 \
             libgl1-mesa-dri dbus-x11 at-spi2-core git ca-certificates curl tar
           # Strip file capabilities (cap_sys_nice) so unprivileged containers allow execve

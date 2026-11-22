@@ -137,7 +137,7 @@ class KWinNestedAdapter:
         keep_bus = False
         try:
             kwin_ready = False
-            for _ in range(30):
+            for _ in range(50):
                 reply = await bus.call(
                     Message(
                         destination="org.freedesktop.DBus",
@@ -156,24 +156,33 @@ class KWinNestedAdapter:
             if not kwin_ready:
                 return None, "kwin_unavailable"
 
-            eis_reply = await asyncio.wait_for(
-                bus.call(
-                    Message(
-                        destination="org.kde.KWin",
-                        path="/org/kde/KWin/EIS/RemoteDesktop",
-                        interface="org.kde.KWin.EIS.RemoteDesktop",
-                        member="connectToEIS",
-                        signature="i",
-                        body=[7],
-                    )
-                ),
-                timeout=3.0,
+            eis_reply = None
+            for attempt in range(10):
+                eis_reply = await asyncio.wait_for(
+                    bus.call(
+                        Message(
+                            destination="org.kde.KWin",
+                            path="/org/kde/KWin/EIS/RemoteDesktop",
+                            interface="org.kde.KWin.EIS.RemoteDesktop",
+                            member="connectToEIS",
+                            signature="i",
+                            body=[7],
+                        )
+                    ),
+                    timeout=3.0,
+                )
+                if eis_reply.message_type != MessageType.ERROR and eis_reply.unix_fds:
+                    self._eis_bus = bus
+                    keep_bus = True
+                    fd = os.dup(int(eis_reply.unix_fds[0]))
+                    return EIClient(fd=fd), "kwin_eis"
+                if attempt < 9:
+                    await asyncio.sleep(0.2)
+
+            logger.warning(
+                "KWin connectToEIS did not yield an EIS fd: %s",
+                getattr(eis_reply, "body", None),
             )
-            if eis_reply.message_type != MessageType.ERROR and eis_reply.unix_fds:
-                self._eis_bus = bus
-                keep_bus = True
-                fd = os.dup(int(eis_reply.unix_fds[0]))
-                return EIClient(fd=fd), "kwin_eis"
             return None, "kwin_no_eis"
         finally:
             if not keep_bus:
