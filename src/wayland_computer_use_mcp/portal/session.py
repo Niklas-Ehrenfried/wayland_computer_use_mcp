@@ -6,7 +6,7 @@ import logging
 import os
 import threading
 import time
-from typing import Any
+from typing import Any, Literal
 
 from PIL import Image
 
@@ -43,6 +43,7 @@ class PortalSession:
         self.target_title: str | None = None
         self.window_offset_x: int = 0
         self.window_offset_y: int = 0
+        self.window_scale: float = 1.0
         self.last_saved_frame_path: str | None = None
         self.last_saved_labeled_path: str | None = None
 
@@ -60,6 +61,7 @@ class PortalSession:
             get_sink_fn=lambda: self.active_driver().get_input_sink(),
             verify_preconditions_fn=self._verify_preconditions,
             get_offsets_fn=lambda: (self.window_offset_x, self.window_offset_y),
+            get_scale_fn=lambda: self.window_scale,
         )
 
     @property
@@ -81,6 +83,7 @@ class PortalSession:
             prev.last_frame = self._last_frame
             prev.last_position = global_geometry_detector.last_position
             prev.last_dimensions = global_geometry_detector.last_dimensions
+            prev.scale = self.window_scale
             self._pid_states[self._target_pid] = prev
 
         self._target_pid = value
@@ -92,6 +95,7 @@ class PortalSession:
             self.target_title = nxt.title
             self.window_offset_x = nxt.offset_x
             self.window_offset_y = nxt.offset_y
+            self.window_scale = nxt.scale
             self._last_frame = nxt.last_frame
             global_clamper.set_bounds(*nxt.bounds)
             global_geometry_detector.last_position = nxt.last_position
@@ -100,6 +104,7 @@ class PortalSession:
             self.target_title = None
             self.window_offset_x = 0
             self.window_offset_y = 0
+            self.window_scale = 1.0
             self._last_frame = None
             global_geometry_detector.last_position = None
             global_geometry_detector.last_dimensions = None
@@ -115,6 +120,7 @@ class PortalSession:
             state.last_frame = self._last_frame
             state.last_position = global_geometry_detector.last_position
             state.last_dimensions = global_geometry_detector.last_dimensions
+            state.scale = self.window_scale
             self._pid_states[pid] = state
             return state
         return self._pid_states.get(pid)
@@ -332,9 +338,10 @@ class PortalSession:
             try:
                 from wayland_computer_use_mcp.compositors import get_display_scale
 
-                scale = get_display_scale(wx, wy)
+                scale = max(1.0, float(get_display_scale(wx, wy) or 1.0))
             except Exception:
                 scale = 1.0
+            self.window_scale = scale
             if scale > 1.0:
                 sx = int(round(wx * scale))
                 sy = int(round(wy * scale))
@@ -403,28 +410,76 @@ class PortalSession:
         )
         self.window_offset_x = wx
         self.window_offset_y = wy
+        try:
+            from wayland_computer_use_mcp.compositors import get_display_scale
+
+            self.window_scale = max(1.0, float(get_display_scale(wx, wy) or 1.0))
+        except Exception:
+            self.window_scale = 1.0
         global_clamper.set_bounds(ww, wh)
 
-    def dispatch_click(self, x: int, y: int, button: str = "left") -> str:
-        return self._input.dispatch_click(x, y, button=button)
+    def dispatch_click(
+        self,
+        x: int,
+        y: int,
+        button: str = "left",
+        coordinate_space: Literal["logical", "physical"] = "logical",
+    ) -> str:
+        return self._input.dispatch_click(x, y, button=button, coordinate_space=coordinate_space)
 
-    def dispatch_double_click(self, x: int, y: int, button: str = "left") -> str:
-        return self._input.dispatch_double_click(x, y, button=button)
+    def dispatch_double_click(
+        self,
+        x: int,
+        y: int,
+        button: str = "left",
+        coordinate_space: Literal["logical", "physical"] = "logical",
+    ) -> str:
+        return self._input.dispatch_double_click(
+            x, y, button=button, coordinate_space=coordinate_space
+        )
 
-    def dispatch_right_click(self, x: int, y: int) -> str:
-        return self._input.dispatch_right_click(x, y)
+    def dispatch_right_click(
+        self,
+        x: int,
+        y: int,
+        coordinate_space: Literal["logical", "physical"] = "logical",
+    ) -> str:
+        return self._input.dispatch_right_click(x, y, coordinate_space=coordinate_space)
 
-    def dispatch_hover(self, x: int, y: int, duration_ms: int = 500) -> str:
-        return self._input.dispatch_hover(x, y, duration_ms=duration_ms)
+    def dispatch_hover(
+        self,
+        x: int,
+        y: int,
+        duration_ms: int = 500,
+        coordinate_space: Literal["logical", "physical"] = "logical",
+    ) -> str:
+        return self._input.dispatch_hover(
+            x, y, duration_ms=duration_ms, coordinate_space=coordinate_space
+        )
 
-    def dispatch_drag(self, start_x: int, start_y: int, end_x: int, end_y: int) -> str:
-        return self._input.dispatch_drag(start_x, start_y, end_x, end_y)
+    def dispatch_drag(
+        self,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+        coordinate_space: Literal["logical", "physical"] = "logical",
+    ) -> str:
+        return self._input.dispatch_drag(
+            start_x, start_y, end_x, end_y, coordinate_space=coordinate_space
+        )
 
     def dispatch_scroll(self, dx: int, dy: int) -> str:
         return self._input.dispatch_scroll(dx, dy)
 
-    def dispatch_type_text(self, text: str, x: int | None = None, y: int | None = None) -> str:
-        return self._input.dispatch_type_text(text, x=x, y=y)
+    def dispatch_type_text(
+        self,
+        text: str,
+        x: int | None = None,
+        y: int | None = None,
+        coordinate_space: Literal["logical", "physical"] = "logical",
+    ) -> str:
+        return self._input.dispatch_type_text(text, x=x, y=y, coordinate_space=coordinate_space)
 
     def dispatch_key_combination(self, keys: list[str]) -> str:
         return self._input.dispatch_key_combination(keys)

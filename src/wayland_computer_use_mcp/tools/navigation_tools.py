@@ -18,6 +18,7 @@ from wayland_computer_use_mcp.a11y import (
     global_event_listener,
     invoke_node_action,
 )
+from wayland_computer_use_mcp.artifacts import prune_artifacts
 from wayland_computer_use_mcp.delta import (
     InteractionResult,
     compute_ui_delta,
@@ -669,6 +670,7 @@ def batch_actions(
                     global_portal_session.capture_frame(
                         save_to_disk=True, filename="batch_failure.png"
                     )
+                    prune_artifacts("screenshots")
                     if global_portal_session.last_saved_frame_path:
                         failure_info["failure_screenshot"] = (
                             global_portal_session.last_saved_frame_path
@@ -722,5 +724,4 @@ def register_navigation_tools(mcp: FastMCP) -> None:
     mcp.tool(annotations=readonly_ann)(inspect_ui_tree)
     mcp.tool(annotations=mutate_ann)(interact_with_node)
     mcp.tool(annotations=mutate_ann)(batch_actions)
-    mcp.tool(annotations=readonly_ann)(watch_ui_events)
     mcp.tool(annotations=readonly_ann)(wait_for_element)

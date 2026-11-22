@@ -50,6 +50,7 @@ def click(
     x: int,
     y: int,
     button: Literal["left", "right", "middle"] = "left",
+    coordinate_space: Literal["logical", "physical"] = "logical",
     pid: int | None = None,
 ) -> InteractionResult:
     """Dispatches a mouse click clamped within the active window boundaries."""
@@ -57,7 +58,9 @@ def click(
         pid,
         "click",
         f"({x}, {y})",
-        lambda: global_portal_session.dispatch_click(x, y, button=button),
+        lambda: global_portal_session.dispatch_click(
+            x, y, button=button, coordinate_space=coordinate_space
+        ),
     )
 
 
@@ -65,6 +68,7 @@ def double_click(
     x: int,
     y: int,
     button: Literal["left", "right", "middle"] = "left",
+    coordinate_space: Literal["logical", "physical"] = "logical",
     pid: int | None = None,
 ) -> InteractionResult:
     """Dispatches a double-click within the active window boundaries."""
@@ -72,40 +76,62 @@ def double_click(
         pid,
         "double_click",
         f"({x}, {y})",
-        lambda: global_portal_session.dispatch_double_click(x, y, button=button),
+        lambda: global_portal_session.dispatch_double_click(
+            x, y, button=button, coordinate_space=coordinate_space
+        ),
     )
 
 
-def right_click(x: int, y: int, pid: int | None = None) -> InteractionResult:
+def right_click(
+    x: int,
+    y: int,
+    coordinate_space: Literal["logical", "physical"] = "logical",
+    pid: int | None = None,
+) -> InteractionResult:
     """Dispatches a right-click within the active window boundaries."""
     return _dispatch_tracked_input(
         pid,
         "right_click",
         f"({x}, {y})",
-        lambda: global_portal_session.dispatch_right_click(x, y),
+        lambda: global_portal_session.dispatch_right_click(x, y, coordinate_space=coordinate_space),
     )
 
 
-def hover(x: int, y: int, duration_ms: int = 500, pid: int | None = None) -> InteractionResult:
+def hover(
+    x: int,
+    y: int,
+    duration_ms: int = 500,
+    coordinate_space: Literal["logical", "physical"] = "logical",
+    pid: int | None = None,
+) -> InteractionResult:
     """Positions cursor at coordinates without clicking to trigger hover states or tooltips."""
     return _dispatch_tracked_input(
         pid,
         "hover",
         f"({x}, {y})",
-        lambda: global_portal_session.dispatch_hover(x, y, duration_ms=duration_ms),
+        lambda: global_portal_session.dispatch_hover(
+            x, y, duration_ms=duration_ms, coordinate_space=coordinate_space
+        ),
         with_delta=False,
     )
 
 
 def drag(
-    start_x: int, start_y: int, end_x: int, end_y: int, pid: int | None = None
+    start_x: int,
+    start_y: int,
+    end_x: int,
+    end_y: int,
+    coordinate_space: Literal["logical", "physical"] = "logical",
+    pid: int | None = None,
 ) -> InteractionResult:
     """Performs a clamped drag-and-drop gesture from start to end coordinates."""
     return _dispatch_tracked_input(
         pid,
         "drag",
         f"({start_x}, {start_y}) -> ({end_x}, {end_y})",
-        lambda: global_portal_session.dispatch_drag(start_x, start_y, end_x, end_y),
+        lambda: global_portal_session.dispatch_drag(
+            start_x, start_y, end_x, end_y, coordinate_space=coordinate_space
+        ),
     )
 
 
@@ -123,6 +149,7 @@ def type_text(
     text: str,
     x: int | None = None,
     y: int | None = None,
+    coordinate_space: Literal["logical", "physical"] = "logical",
     pid: int | None = None,
 ) -> InteractionResult:
     """Injects keyboard characters. If coordinates (x, y) are provided, clicks first to focus."""
@@ -131,7 +158,9 @@ def type_text(
         pid,
         "type_text",
         target,
-        lambda: global_portal_session.dispatch_type_text(text, x=x, y=y),
+        lambda: global_portal_session.dispatch_type_text(
+            text, x=x, y=y, coordinate_space=coordinate_space
+        ),
     )
 
 
@@ -155,6 +184,7 @@ def mouse(
     dy: int = 0,
     button: Literal["left", "right", "middle"] = "left",
     duration_ms: int = 500,
+    coordinate_space: Literal["logical", "physical"] = "logical",
     pid: int | None = None,
 ) -> InteractionResult:
     """Level 2 coordinate mouse fallback (prefer interact_with_node when AT-SPI is available).
@@ -164,22 +194,30 @@ def mouse(
     - 'hover': requires (x, y); optional duration_ms.
     - 'drag': requires (x, y) start and (end_x, end_y) target.
     - 'scroll': uses dx / dy discrete wheel deltas.
+    Set coordinate_space='physical' when passing raw pixels from HiDPI capture_window_frame.
     """
     act = action.strip().lower()
     if act in ("click", "double_click", "right_click", "hover"):
         if x is None or y is None:
             raise ValueError(f"Mouse action '{act}' requires 'x' and 'y' coordinates.")
         if act == "click":
-            return click(x, y, button=button, pid=pid)
+            return click(x, y, button=button, coordinate_space=coordinate_space, pid=pid)
         if act == "double_click":
-            return double_click(x, y, button=button, pid=pid)
+            return double_click(x, y, button=button, coordinate_space=coordinate_space, pid=pid)
         if act == "right_click":
-            return right_click(x, y, pid=pid)
-        return hover(x, y, duration_ms=duration_ms, pid=pid)
+            return right_click(x, y, coordinate_space=coordinate_space, pid=pid)
+        return hover(x, y, duration_ms=duration_ms, coordinate_space=coordinate_space, pid=pid)
     if act == "drag":
         if None in (x, y, end_x, end_y):
             raise ValueError("Mouse action 'drag' requires 'x', 'y', 'end_x', and 'end_y'.")
-        return drag(int(x), int(y), int(end_x), int(end_y), pid=pid)  # type: ignore[arg-type]
+        return drag(
+            int(x),  # type: ignore[arg-type]
+            int(y),  # type: ignore[arg-type]
+            int(end_x),  # type: ignore[arg-type]
+            int(end_y),  # type: ignore[arg-type]
+            coordinate_space=coordinate_space,
+            pid=pid,
+        )
     if act == "scroll":
         return scroll(dx, dy, pid=pid)
     raise ValueError(f"Unknown mouse action '{action}'.")

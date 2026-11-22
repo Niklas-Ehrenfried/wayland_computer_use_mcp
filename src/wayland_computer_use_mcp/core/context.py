@@ -22,6 +22,7 @@ class WindowSessionState:
     last_frame: Any = None
     last_position: tuple[int, int] | None = None
     last_dimensions: tuple[int, int] | None = field(default=None)
+    scale: float = 1.0
 
 
 @dataclass(frozen=True)

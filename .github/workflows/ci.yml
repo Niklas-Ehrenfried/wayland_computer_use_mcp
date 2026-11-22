@@ -20,6 +20,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
           version: "latest"
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -29,18 +30,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config \
-            libcairo2-dev \
-            libgirepository-2.0-dev \
-            libgirepository1.0-dev \
-            gir1.2-glib-2.0 \
-            gir1.2-gtk-4.0 \
-            gir1.2-adw-1 \
             dbus-x11 \
             at-spi2-core
 
       - name: Install dependencies
-        run: uv sync --all-extras --dev
+        run: uv sync --dev
 
       - name: Run Ruff Linter
         if: matrix.python-version == '3.11'
@@ -72,29 +66,32 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
           version: "latest"
 
-      - name: Set up Python 3.11
-        run: uv python install 3.11
-
-      - name: Install headless ${{ matrix.compositor }} and GTK4/AT-SPI dependencies
+      - name: Install headless ${{ matrix.compositor }}, GTK4, Qt6, and AT-SPI dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ${{ matrix.compositor }} \
-            pkg-config \
-            libcairo2-dev \
-            libgirepository-2.0-dev \
-            libgirepository1.0-dev \
+            python3 \
+            python3-gi \
+            python3-pyqt6 \
+            qt6-wayland \
             gir1.2-glib-2.0 \
             gir1.2-gtk-4.0 \
             gir1.2-adw-1 \
             libgl1-mesa-dri \
             dbus-x11 \
             at-spi2-core
+          if command -v labwc >/dev/null 2>&1; then
+            cp /usr/bin/labwc /tmp/labwc.nocap && chmod 0755 /tmp/labwc.nocap && sudo mv /tmp/labwc.nocap /usr/bin/labwc
+          fi
 
-      - name: Install dependencies
-        run: uv sync --all-extras --dev
+      - name: Install dependencies (system-site-packages)
+        run: |
+          uv venv --python /usr/bin/python3 --system-site-packages
+          uv sync --dev --inexact
 
       - name: Run Live Blackbox Suite (${{ matrix.compositor }} headless)
         env:
@@ -102,7 +99,7 @@ jobs:
           WLR_BACKENDS: headless
           WLR_RENDERER: pixman
           WLR_LIBINPUT_NO_DEVICES: "1"
-        run: uv run pytest tests/test_virtual_session.py tests/test_live_example_app.py -v --tb=short --no-cov
+        run: uv run --no-sync pytest tests/test_virtual_session.py tests/test_live_example_app.py tests/test_cross_toolkit_live.py -v --tb=short --no-cov
 
   live-blackbox-distros:
     runs-on: ubuntu-latest
@@ -119,24 +116,26 @@ jobs:
     container:
       image: ${{ matrix.image }}
     steps:
-      - name: Install base container & GTK4/labwc dependencies (${{ matrix.distro }})
+      - name: Install base container & GTK4/Qt6/labwc dependencies (${{ matrix.distro }})
         run: |
           if [ "${{ matrix.distro }}" = "debian-trixie" ]; then
             DEBIAN_FRONTEND=noninteractive apt-get update
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-              labwc gcc pkg-config libcairo2-dev libgirepository-2.0-dev \
+              labwc python3 python3-gi python3-pyqt6 qt6-wayland \
               gir1.2-glib-2.0 gir1.2-gtk-4.0 gir1.2-adw-1 libgl1-mesa-dri \
               dbus-x11 at-spi2-core git ca-certificates curl tar
           elif [ "${{ matrix.distro }}" = "fedora" ]; then
             dnf install -y \
-              labwc gcc pkgconf-pkg-config cairo-devel gobject-introspection-devel \
+              labwc python3 python3-gobject python3-pyqt6 qt6-qtwayland \
               gtk4 libadwaita mesa-dri-drivers dbus-daemon at-spi2-core \
               git ca-certificates curl tar
           elif [ "${{ matrix.distro }}" = "archlinux" ]; then
             pacman -Syu --noconfirm \
-              labwc gcc pkgconf cairo gobject-introspection gtk4 libadwaita \
-              mesa dbus at-spi2-core git ca-certificates curl tar
+              labwc python python-gobject python-pyqt6 qt6-wayland \
+              gtk4 libadwaita mesa dbus at-spi2-core git ca-certificates curl tar
           fi
+          # Strip file capabilities (e.g. cap_sys_nice) so unprivileged containers allow execve
+          cp /usr/bin/labwc /usr/bin/labwc.nocap && chmod 0755 /usr/bin/labwc.nocap && mv /usr/bin/labwc.nocap /usr/bin/labwc
 
       - uses: actions/checkout@v4
 
@@ -146,11 +145,10 @@ jobs:
           enable-cache: false
           version: "latest"
 
-      - name: Set up Python 3.11
-        run: uv python install 3.11
-
-      - name: Install dependencies
-        run: uv sync --all-extras --dev
+      - name: Install dependencies (system-site-packages)
+        run: |
+          uv venv --python /usr/bin/python3 --system-site-packages
+          uv sync --dev --inexact
 
       - name: Run Live Blackbox Suite on ${{ matrix.distro }} (labwc headless)
         env:
@@ -158,7 +156,7 @@ jobs:
           WLR_BACKENDS: headless
           WLR_RENDERER: pixman
           WLR_LIBINPUT_NO_DEVICES: "1"
-        run: uv run pytest tests/test_virtual_session.py tests/test_live_example_app.py -v --tb=short --no-cov
+        run: uv run --no-sync pytest tests/test_virtual_session.py tests/test_live_example_app.py tests/test_cross_toolkit_live.py -v --tb=short --no-cov
 
   live-blackbox-kubuntu-kwin:
     runs-on: ubuntu-latest
@@ -166,13 +164,15 @@ jobs:
     container:
       image: ubuntu:rolling
     steps:
-      - name: Install KWin Plasma 6 & GTK4/AT-SPI dependencies (Kubuntu rolling)
+      - name: Install KWin Plasma 6 & GTK4/Qt6/AT-SPI dependencies (Kubuntu rolling)
         run: |
           DEBIAN_FRONTEND=noninteractive apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            kwin-wayland libei1 qt6-wayland gcc pkg-config libcairo2-dev \
-            libgirepository-2.0-dev gir1.2-glib-2.0 gir1.2-gtk-4.0 gir1.2-adw-1 \
+            kwin-wayland libei1 qt6-wayland python3 python3-gi python3-pyqt6 \
+            gir1.2-glib-2.0 gir1.2-gtk-4.0 gir1.2-adw-1 \
             libgl1-mesa-dri dbus-x11 at-spi2-core git ca-certificates curl tar
+          # Strip file capabilities (cap_sys_nice) so unprivileged containers allow execve
+          cp /usr/bin/kwin_wayland /usr/bin/kwin_wayland.nocap && chmod 0755 /usr/bin/kwin_wayland.nocap && mv /usr/bin/kwin_wayland.nocap /usr/bin/kwin_wayland
 
       - uses: actions/checkout@v4
 
@@ -182,14 +182,13 @@ jobs:
           enable-cache: false
           version: "latest"
 
-      - name: Set up Python 3.11
-        run: uv python install 3.11
-
-      - name: Install dependencies
-        run: uv sync --all-extras --dev
+      - name: Install dependencies (system-site-packages)
+        run: |
+          uv venv --python /usr/bin/python3 --system-site-packages
+          uv sync --dev --inexact
 
       - name: Run Live Blackbox Suite on Kubuntu Rolling (kwin_wayland headless)
         env:
           WAYLAND_MCP_VIRTUAL_CMD: kwin_wayland
           LIBGL_ALWAYS_SOFTWARE: "1"
-        run: uv run pytest tests/test_virtual_session.py tests/test_live_example_app.py -v --tb=short --no-cov
+        run: uv run --no-sync pytest tests/test_virtual_session.py tests/test_live_example_app.py tests/test_cross_toolkit_live.py -v --tb=short --no-cov

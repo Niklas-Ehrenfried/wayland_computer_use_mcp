@@ -22,7 +22,7 @@ from wayland_computer_use_mcp.process import (
 from wayland_computer_use_mcp.process import (
     restart as restart_process,
 )
-from wayland_computer_use_mcp.security import global_clamper
+from wayland_computer_use_mcp.security import global_clamper, global_preemption_manager
 from wayland_computer_use_mcp.tools import emit_ctx_log
 
 logger = logging.getLogger("wayland_computer_use_mcp.tools.process")
@@ -135,7 +135,7 @@ def launch_app(
     args: list[str] | None = None,
     restart: bool = False,
     cwd: str | None = None,
-    ready_timeout_ms: int = 2500,
+    ready_timeout_ms: int = 4000,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Launches a Python GUI script, native binary, or $PATH command with auto-focus.
@@ -311,8 +311,10 @@ def get_app_logs(pid: int | None = None, lines: int = 50) -> str:
 
 def get_session_status() -> dict[str, Any]:
     """Reports active display mode, compositor adapter, input readiness, and target window."""
+    cfg = get_config()
     summary = _session_summary()
     w, h = global_clamper.dimensions
+    pause_path = global_preemption_manager.takeover_pause_path()
     summary.update(
         {
             "target_pid": global_portal_session.target_pid,
@@ -323,6 +325,16 @@ def get_session_status() -> dict[str, Any]:
                 w,
                 h,
             ],
+            "window_scale": global_portal_session.window_scale,
+            "takeover_paused": (
+                global_preemption_manager.is_paused
+                or global_preemption_manager._is_pause_file_active()
+            ),
+            "takeover_pause_file": str(pause_path) if pause_path else None,
+            "artifact_retention": {
+                "max_screenshots": cfg.max_screenshots,
+                "artifact_ttl_hours": cfg.artifact_ttl_hours,
+            },
             "managed_apps_count": len(list_active_processes()),
         }
     )

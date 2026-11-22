@@ -2,8 +2,8 @@
 """End-to-End AI Coding Agent Example Client for wayland-computer-use-mcp.
 
 Simulates an AI coding agent connecting to the FastMCP server over stdio,
-discovering the 18 default exposed tools, and driving examples/test_gui_app.py:
-1. Tool discovery (18 default tools).
+discovering the 17 default exposed tools, and driving examples/test_gui_app.py:
+1. Tool discovery (17 default tools).
 2. Session check & lifecycle: get_session_status, launch_app, list_managed_apps.
 3. Semantic tree inspection (inspect_ui_tree) & Tree-First interaction (interact_with_node).
 4. Atomic multi-step interaction (batch_actions).

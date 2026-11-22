@@ -109,13 +109,19 @@ def get_artifacts_dir(subdir: str = "screenshots") -> Path:
 
 def prune_artifacts(
     subdir: str = "screenshots",
-    max_files: int = 25,
-    max_age_hours: float = 24.0,
+    max_files: int | None = None,
+    max_age_hours: float | None = None,
 ) -> int:
     """Removes expired or excess oldest files from an artifact directory (never presets)."""
     if subdir == "presets":
         return 0
     try:
+        from wayland_computer_use_mcp.config import get_config
+
+        cfg = get_config()
+        effective_max_files = cfg.max_screenshots if max_files is None else max_files
+        effective_max_age = cfg.artifact_ttl_hours if max_age_hours is None else max_age_hours
+
         target_dir = get_artifacts_dir(subdir)
         if not target_dir.is_dir():
             return 0
@@ -124,14 +130,14 @@ def prune_artifacts(
             return 0
 
         removed = 0
-        cutoff = time.time() - max(0.0, max_age_hours) * 3600.0
+        cutoff = time.time() - max(0.0, effective_max_age) * 3600.0
         kept: list[tuple[float, Path]] = []
         for p in files:
             try:
                 mtime = p.stat().st_mtime
             except OSError:
                 continue
-            if max_age_hours > 0 and mtime < cutoff:
+            if effective_max_age > 0 and mtime < cutoff:
                 try:
                     p.unlink()
                     removed += 1
@@ -140,9 +146,9 @@ def prune_artifacts(
             else:
                 kept.append((mtime, p))
 
-        if max_files >= 0 and len(kept) > max_files:
+        if effective_max_files > 0 and len(kept) > effective_max_files:
             kept.sort(key=lambda item: item[0])
-            for _, p in kept[: len(kept) - max_files]:
+            for _, p in kept[: len(kept) - effective_max_files]:
                 try:
                     p.unlink()
                     removed += 1

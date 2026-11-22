@@ -43,7 +43,9 @@ def test_unsupervised_virtual_session_execution():
     set_config(cfg)
     pid: int | None = None
     try:
-        launch_res = launch_app("examples/test_gui_app.py", args=["--test-mode"])
+        launch_res = launch_app(
+            "examples/test_gui_app.py", args=["--test-mode"], ready_timeout_ms=8000
+        )
         assert launch_res["status"] == "launched"
         pid = int(launch_res["pid"])
         assert launch_res["interactive_elements"]

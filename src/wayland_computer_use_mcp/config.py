@@ -53,6 +53,12 @@ class Config:
     # Defer XDG RemoteDesktop/ScreenCast portal prompts in live mode until visual/physical use
     lazy_portal: bool = False
 
+    # Maximum rolling screenshot artifacts retained per folder (0 = unlimited)
+    max_screenshots: int = 25
+
+    # Artifact retention time-to-live in hours (0 = unlimited)
+    artifact_ttl_hours: float = 24.0
+
     @classmethod
     def load(cls) -> Config:
         config = cls()
@@ -88,6 +94,12 @@ class Config:
                         config.action_delay_seconds = float(data["action_delay_seconds"])
                     if "lazy_portal" in data:
                         config.lazy_portal = bool(data["lazy_portal"])
+                    if "max_screenshots" in data and isinstance(data["max_screenshots"], int):
+                        config.max_screenshots = max(0, data["max_screenshots"])
+                    if "artifact_ttl_hours" in data and isinstance(
+                        data["artifact_ttl_hours"], (int, float)
+                    ):
+                        config.artifact_ttl_hours = max(0.0, float(data["artifact_ttl_hours"]))
             except Exception:
                 pass
 
@@ -148,6 +160,20 @@ class Config:
         if os.environ.get("WAYLAND_MCP_LAZY_PORTAL", "").strip().lower() in ("1", "true", "yes"):
             config.lazy_portal = True
 
+        if "WAYLAND_MCP_MAX_SCREENSHOTS" in os.environ:
+            try:
+                config.max_screenshots = max(0, int(os.environ["WAYLAND_MCP_MAX_SCREENSHOTS"]))
+            except ValueError:
+                pass
+
+        if "WAYLAND_MCP_ARTIFACT_TTL_HOURS" in os.environ:
+            try:
+                config.artifact_ttl_hours = max(
+                    0.0, float(os.environ["WAYLAND_MCP_ARTIFACT_TTL_HOURS"])
+                )
+            except ValueError:
+                pass
+
         return config
 
     def apply_cli_args(self, args: list[str]) -> list[str]:
@@ -184,7 +210,7 @@ class Config:
                 self.display_mode = "auto"
             elif arg == "--virtual":
                 self.display_mode = "virtual"
-            elif arg in ("--virtual-window", "--isolated-window"):
+            elif arg in ("--virtual-window", "--isolated-window", "--preview-window"):
                 self.display_mode = "virtual"
                 self.virtual_headed = True
             elif arg == "--live":
@@ -234,6 +260,7 @@ Options:
   --live                      Run in active Wayland user desktop session.
   --virtual                   Run in a headless virtual Wayland compositor session.
   --virtual-window            Open a visible Playwright-style isolated compositor window.
+  --preview-window            Alias for --virtual-window (live preview during Blackbox runs).
   --display-mode=MODE         Set display mode ('auto', 'live', or 'virtual').
   --window-only               Clamp capture and input to active application window (default).
   --fullscreen, --monitor     Allow full desktop/screen capture and interaction.
@@ -254,6 +281,9 @@ Environment Variables:
   WAYLAND_MCP_ACTION_DELAY             Extra pause in seconds after physical inputs
   WAYLAND_MCP_PROJECT_DIR              Override project root for .agents/artifacts/
   WAYLAND_MCP_SAVE_FRAMES_DIR          Directory to persist screenshots
+  WAYLAND_MCP_MAX_SCREENSHOTS          Max rolling screenshots retained (default: 25, 0=unlimited)
+  WAYLAND_MCP_ARTIFACT_TTL_HOURS       Screenshot retention TTL in hours (default: 24, 0=unlimited)
+  WAYLAND_MCP_PAUSE_FILE               Override path for human-takeover pause marker file
   WAYLAND_MCP_ENABLE_DESKTOP_INSTALLER Set '1' to enable desktop shortcut tools
 """
 

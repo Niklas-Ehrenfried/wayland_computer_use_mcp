@@ -240,3 +240,28 @@ def test_virtual_compositor_cmd_cross_de_and_flags(monkeypatch):
 
     monkeypatch.setenv("WAYLAND_MCP_VIRTUAL_HEADED", "1")
     assert Config.load().virtual_headed is True
+
+
+def test_retention_config_and_preview_window_cli(tmp_path, monkeypatch):
+    """Verifies max_screenshots, artifact_ttl_hours, and --preview-window alias."""
+    test_config_file = tmp_path / "config.json"
+    monkeypatch.setattr("wayland_computer_use_mcp.config.CONFIG_FILE", test_config_file)
+    monkeypatch.setattr("wayland_computer_use_mcp.config.CONFIG_DIR", tmp_path)
+
+    cfg = Config(max_screenshots=10, artifact_ttl_hours=6.5)
+    cfg.save()
+    loaded = Config.load()
+    assert loaded.max_screenshots == 10
+    assert loaded.artifact_ttl_hours == 6.5
+
+    monkeypatch.setenv("WAYLAND_MCP_MAX_SCREENSHOTS", "42")
+    monkeypatch.setenv("WAYLAND_MCP_ARTIFACT_TTL_HOURS", "12.5")
+    env_cfg = Config.load()
+    assert env_cfg.max_screenshots == 42
+    assert env_cfg.artifact_ttl_hours == 12.5
+
+    cli_cfg = Config()
+    cli_cfg.apply_cli_args(["--preview-window"])
+    assert cli_cfg.display_mode == "virtual"
+    assert cli_cfg.virtual_headed is True
+    assert "--preview-window" in get_help_text()

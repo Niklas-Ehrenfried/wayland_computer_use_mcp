@@ -34,7 +34,7 @@ def test_package_version_and_bundled_prompt():
 
 
 async def test_registered_tools():
-    # Active high-leverage exposed MCP tools (18 default tools; desktop installer is opt-in)
+    # Active high-leverage exposed MCP tools (17 default tools; desktop installer is opt-in)
     exposed_tool_names = [
         "launch_app",
         "restart_app",
@@ -52,7 +52,6 @@ async def test_registered_tools():
         "clipboard_write",
         "window_control",
         "list_managed_apps",
-        "watch_ui_events",
         "preset_workflow",
     ]
 
@@ -63,7 +62,7 @@ async def test_registered_tools():
     for name in exposed_tool_names:
         assert name in registered_names, f"Expected tool '{name}' to be registered"
 
-    assert len(registered_names) == 18
+    assert len(registered_names) == 17
     assert "install_to_desktop" not in registered_names
     assert "uninstall_from_desktop" not in registered_names
     assert mcp.instructions and "Tree-First" in mcp.instructions
@@ -89,6 +88,7 @@ async def test_registered_tools():
         "get_window_geometry",
         "focus_window",
         "take_labeled_screenshot",
+        "watch_ui_events",
     ]
     for name in retired_tools:
         assert name not in registered_names, f"Tool '{name}' should be consolidated/internal"
@@ -197,7 +197,6 @@ async def test_tool_output_schemas_match_return_types():
         "inspect_ui_tree",
         "wait_for_element",
         "batch_actions",
-        "watch_ui_events",
         "window_control",
         "preset_workflow",
     }

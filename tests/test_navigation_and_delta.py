@@ -656,6 +656,8 @@ def test_agent_ergonomics_watch_events_and_navigation_batch(monkeypatch, tmp_pat
     assert batch_wait["status"] == "success" and "matched 'present'" in batch_wait["results"][0]
 
     monkeypatch.setattr(get_config(), "mock_mode", False)
+    monkeypatch.setattr(get_config(), "display_mode", "live")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
     monkeypatch.setattr(
         "wayland_computer_use_mcp.tools.navigation_tools.is_responsive", lambda p: True
     )

@@ -10,7 +10,7 @@
 Unlike conventional "computer use" agents that rely on high-latency video streaming and expensive pixel-based coordinate guessing, `wayland-computer-use-mcp` implements a **Tree-First Hybrid Semantic Execution Model**:
 - **Atomic Programmatic Execution**: Inspects semantic widget trees via AT-SPI2 D-Bus interfaces and executes actions (`DoAction`, `EditableText`, `Value`, `Text`) silently without moving the physical cursor.
 - **Zero-Disruption Interactions**: The desktop pointer only moves on explicit pointer calls (`mouse`) or when Level 1 AT-SPI is unsupported and Level 2 fallback is needed.
-- **Playwright-Style Locators & Deltas**: Supports optional `role` disambiguation (`target="Save", role="push button"`), event-driven UI settlement (`watch_ui_events`), and compact state diffs.
+- **Playwright-Style Locators & Deltas**: Supports optional `role` disambiguation (`target="Save", role="push button"`), event-driven AT-SPI2 settlement (`AtspiEventListener`), and compact state diffs.
 - **Resilient Physical Fallback**: Custom canvas widgets, dropdown popovers, and complex surfaces fall back smoothly to clamped physical pointer clicks, drags, discrete wheel scrolls, and keystrokes.
 
 ---
@@ -189,18 +189,17 @@ uv sync
 
 ---
 
-## Exposed Tool Suite (18 Default Tools + 2 Opt-In Tools)
+## Exposed Tool Suite (17 Default Tools + 2 Opt-In Tools)
 
-### 1. Tree-First Semantic Navigation & Macro Presets (6 Tools)
+### 1. Tree-First Semantic Navigation & Macro Presets (5 Tools)
 - **`inspect_ui_tree(pid, max_depth, include_raw_tree, query, role_filter)`**: Returns a compact functional `hierarchy`, monotonic `tree_generation`, and collapsed 1D `interactive_elements` list (`b1`, `e1`, `c1`, `sw1`, `li1`) fetched via bulk `Cache.GetItems` with parallel recursive fallback (pass `query`/`role_filter` to filter large UIs or `include_raw_tree=True` for full D-Bus nodes).
 - **`interact_with_node(target, action, text, value, role, pid, settle_timeout_ms, ...)`**: Dispatches semantic interactions by compact ID (`b1`) or widget label (`node_id` kept as deprecated alias; optional `role` narrows matches like Playwright's `getByRole`) with stale-ID identity verification & rebinding. Executes Level 1 AT-SPI directly without moving the mouse cursor, falling back to physical input only when required. Returns structured JSON UI deltas and closest-match hints on lookup misses.
 - **`wait_for_element(target, role, state, timeout_ms, poll_interval_ms, pid)`**: Polls until an element reaches `"present"`, `"gone"`, `"enabled"`, `"checked"`, or `"focused"` (fail-fast if the process crashes).
 - **`batch_actions(actions, pid)`**: Executes a typed `BatchActionStep` sequence atomically (`click`, `type`, `wait`, `wait_for`, etc.) with step-by-step + net delta tracking, structured `error_code` / `recovery_hint`, and automatic `batch_failure.png` trace capture on live failures.
 - **`preset_workflow(action, name, description, steps, pid)`**: Manages and executes reusable multi-step interaction presets (`list`, `run`, `view`, `save`, `delete`) stored as persistent JSON artifacts, auto-normalizing positional node IDs (`b1`) into stable semantic `target` + `role` locators on save.
-- **`watch_ui_events(timeout_ms, pid)`**: Streams AT-SPI2 D-Bus accessibility events (`Object:StateChanged`, `ChildrenChanged`, `TextChanged`, `Window:Activate`) directly to observe async UI changes.
 
 ### 2. Clamped Physical Input (2 Consolidated Tools)
-- **`mouse(action, x, y, end_x, end_y, button, duration_ms, dx, dy, pid)`**: Consolidated pointer tool supporting `action="click" | "double_click" | "right_click" | "hover" | "drag" | "scroll"`, all clamped strictly within the target window bounds.
+- **`mouse(action, x, y, end_x, end_y, button, duration_ms, dx, dy, coordinate_space, pid)`**: Consolidated pointer tool supporting `action="click" | "double_click" | "right_click" | "hover" | "drag" | "scroll"`, all clamped strictly within the target window bounds (pass `coordinate_space="physical"` when clicking raw pixel offsets from HiDPI screenshots).
 - **`keyboard(action, text, keys, x, y, pid)`**: Consolidated keyboard tool supporting `action="type" | "keys"` with live XKB keymap synthesis, automated clipboard paste fallback for strings > 30 chars, and dangerous OS shortcut blocking.
 
 ### 3. Visual Grounding & Inspection (1 Tool)

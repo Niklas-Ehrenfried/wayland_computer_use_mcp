@@ -388,10 +388,30 @@ class UserPreemptionManager:
         with self._lock:
             self.is_paused = paused
 
+    @staticmethod
+    def takeover_pause_path() -> Path | None:
+        """Returns the configured takeover pause file path, if any."""
+        env_path = os.environ.get("WAYLAND_MCP_PAUSE_FILE", "").strip()
+        if env_path:
+            return Path(env_path).expanduser()
+        try:
+            from wayland_computer_use_mcp.core.context import get_active_context
+
+            ctx = get_active_context()
+            if ctx is not None and ctx.xdg_runtime_dir:
+                return Path(ctx.xdg_runtime_dir) / "takeover.pause"
+        except Exception:
+            pass
+        return None
+
+    def _is_pause_file_active(self) -> bool:
+        path = self.takeover_pause_path()
+        return bool(path is not None and path.exists())
+
     def wait_for_user_idle(self, max_wait: float | None = None) -> None:
-        """Waits until user physical interaction settles and cooldown expires."""
+        """Waits until user physical interaction settles and cooldown/pause expires."""
         effective_mode, _, _ = resolve_effective_display_mode(get_config())
-        if effective_mode == "virtual":
+        if effective_mode == "virtual" and not self._is_pause_file_active() and not self.is_paused:
             return
 
         timeout = max_wait if max_wait is not None else self.max_wait_seconds
@@ -402,15 +422,27 @@ class UserPreemptionManager:
                 paused = self.is_paused
                 last_act = self.last_user_activity
                 cooldown = self.cooldown_seconds
+            file_paused = self._is_pause_file_active()
 
-            if not paused and (time.time() - last_act >= cooldown):
+            if (
+                not paused
+                and not file_paused
+                and (effective_mode == "virtual" or time.time() - last_act >= cooldown)
+            ):
                 return  # User has settled and is idle
 
             time.sleep(0.05)
 
         with self._lock:
             paused = self.is_paused
+        pause_path = self.takeover_pause_path()
+        file_paused = bool(pause_path is not None and pause_path.exists())
 
+        if file_paused:
+            raise RuntimeError(
+                f"Agent actions are currently paused by user takeover ({pause_path}). "
+                "Remove the pause file to resume."
+            )
         if paused:
             raise RuntimeError(
                 "Agent actions are currently paused by user. Please wait until resumed."

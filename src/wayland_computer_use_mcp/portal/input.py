@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from wayland_computer_use_mcp.clipboard import read_system_clipboard, write_system_clipboard
 from wayland_computer_use_mcp.config import get_config
@@ -29,10 +29,29 @@ class InputDispatcher:
         get_sink_fn: Callable[[], InputSink | None],
         verify_preconditions_fn: Callable[[], None],
         get_offsets_fn: Callable[[], tuple[int, int]],
+        get_scale_fn: Callable[[], float] | None = None,
     ) -> None:
         self._get_sink = get_sink_fn
         self._verify_preconditions = verify_preconditions_fn
         self._get_offsets = get_offsets_fn
+        self._get_scale = get_scale_fn or (lambda: 1.0)
+
+    def _to_logical_coords(
+        self,
+        x: int,
+        y: int,
+        coordinate_space: Literal["logical", "physical"] = "logical",
+    ) -> tuple[int, int]:
+        """Converts screenshot physical pixels to logical window coordinates when requested."""
+        space = coordinate_space.strip().lower()
+        if space == "logical":
+            return x, y
+        if space == "physical":
+            scale = max(1.0, float(self._get_scale() or 1.0))
+            return int(round(x / scale)), int(round(y / scale))
+        raise ValueError(
+            f"Unknown coordinate_space '{coordinate_space}'; expected 'logical' or 'physical'."
+        )
 
     @staticmethod
     def _apply_action_delay() -> None:
@@ -59,10 +78,17 @@ class InputDispatcher:
                 )
         return sink
 
-    def dispatch_click(self, x: int, y: int, button: str = "left") -> str:
+    def dispatch_click(
+        self,
+        x: int,
+        y: int,
+        button: str = "left",
+        coordinate_space: Literal["logical", "physical"] = "logical",
+    ) -> str:
         """Validates bounds and executes mouse click."""
         self._verify_preconditions()
-        cx, cy = global_clamper.validate_and_clamp(x, y)
+        lx, ly = self._to_logical_coords(x, y, coordinate_space)
+        cx, cy = global_clamper.validate_and_clamp(lx, ly)
         sink = self._require_sink(require_pointer=True)
         button_code = _BUTTON_CODES.get(button.lower(), BTN_LEFT)
         offset_x, offset_y = self._get_offsets()
@@ -73,10 +99,17 @@ class InputDispatcher:
         self._apply_action_delay()
         return f"Clicked {button} button at ({cx}, {cy})"
 
-    def dispatch_double_click(self, x: int, y: int, button: str = "left") -> str:
+    def dispatch_double_click(
+        self,
+        x: int,
+        y: int,
+        button: str = "left",
+        coordinate_space: Literal["logical", "physical"] = "logical",
+    ) -> str:
         """Performs a clamped double-click."""
         self._verify_preconditions()
-        cx, cy = global_clamper.validate_and_clamp(x, y)
+        lx, ly = self._to_logical_coords(x, y, coordinate_space)
+        cx, cy = global_clamper.validate_and_clamp(lx, ly)
         sink = self._require_sink(require_pointer=True)
         button_code = _BUTTON_CODES.get(button.lower(), BTN_LEFT)
         offset_x, offset_y = self._get_offsets()
@@ -87,14 +120,26 @@ class InputDispatcher:
         self._apply_action_delay()
         return f"Double-clicked {button} button at ({cx}, {cy})"
 
-    def dispatch_right_click(self, x: int, y: int) -> str:
+    def dispatch_right_click(
+        self,
+        x: int,
+        y: int,
+        coordinate_space: Literal["logical", "physical"] = "logical",
+    ) -> str:
         """Performs a clamped right-click."""
-        return self.dispatch_click(x, y, button="right")
+        return self.dispatch_click(x, y, button="right", coordinate_space=coordinate_space)
 
-    def dispatch_hover(self, x: int, y: int, duration_ms: int = 200) -> str:
+    def dispatch_hover(
+        self,
+        x: int,
+        y: int,
+        duration_ms: int = 200,
+        coordinate_space: Literal["logical", "physical"] = "logical",
+    ) -> str:
         """Positions cursor at coordinates without clicking to trigger hover states."""
         self._verify_preconditions()
-        cx, cy = global_clamper.validate_and_clamp(x, y)
+        lx, ly = self._to_logical_coords(x, y, coordinate_space)
+        cx, cy = global_clamper.validate_and_clamp(lx, ly)
         sink = self._require_sink(require_pointer=True)
         offset_x, offset_y = self._get_offsets()
 
@@ -104,11 +149,20 @@ class InputDispatcher:
         self._apply_action_delay()
         return f"Hovered pointer at ({cx}, {cy}) for {duration_ms}ms"
 
-    def dispatch_drag(self, start_x: int, start_y: int, end_x: int, end_y: int) -> str:
+    def dispatch_drag(
+        self,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+        coordinate_space: Literal["logical", "physical"] = "logical",
+    ) -> str:
         """Validates bounds and performs clamped drag-and-drop gesture."""
         self._verify_preconditions()
-        s_x, s_y = global_clamper.validate_and_clamp(start_x, start_y)
-        e_x, e_y = global_clamper.validate_and_clamp(end_x, end_y)
+        lsx, lsy = self._to_logical_coords(start_x, start_y, coordinate_space)
+        lex, ley = self._to_logical_coords(end_x, end_y, coordinate_space)
+        s_x, s_y = global_clamper.validate_and_clamp(lsx, lsy)
+        e_x, e_y = global_clamper.validate_and_clamp(lex, ley)
         sink = self._require_sink(require_pointer=True)
         offset_x, offset_y = self._get_offsets()
 
@@ -138,12 +192,20 @@ class InputDispatcher:
         self._apply_action_delay()
         return f"Scrolled dx={dx}, dy={dy}"
 
-    def dispatch_type_text(self, text: str, x: int | None = None, y: int | None = None) -> str:
+    def dispatch_type_text(
+        self,
+        text: str,
+        x: int | None = None,
+        y: int | None = None,
+        coordinate_space: Literal["logical", "physical"] = "logical",
+    ) -> str:
         """Types text via hybrid fast key events + clipboard paste fallback."""
         self._verify_preconditions()
         prefix = ""
         if x is not None and y is not None:
-            prefix = self.dispatch_click(x, y, button="left") + ". "
+            prefix = (
+                self.dispatch_click(x, y, button="left", coordinate_space=coordinate_space) + ". "
+            )
             time.sleep(0.015)
 
         sink = self._require_sink(require_pointer=False)

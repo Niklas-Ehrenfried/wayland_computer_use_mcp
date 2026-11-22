@@ -49,15 +49,14 @@ This document provides a technical component-by-component breakdown of `wayland-
 ---
 
 ### B. Modular Tools Package ([`tools/`](file:///home/niklas/Documents/Coding/Hobby/wayland_computer_use_mcp/src/wayland_computer_use_mcp/tools/))
-Partitioned into 6 focused domain sub-modules (18 default tools + 2 opt-in tools):
+Partitioned into 6 focused domain sub-modules (17 default tools + 2 opt-in tools):
 1. **`input_tools.py`** (2 consolidated MCP tools + 8 Python helper exports):
-   - `mouse(action, x, y, end_x, end_y, button, duration_ms, dx, dy, pid)` and `keyboard(action, text, keys, x, y, pid)` replace the 8 separate raw input schemas on FastMCP while keeping `click`, `double_click`, `right_click`, `hover`, `drag`, `scroll`, `type_text`, and `key_combination` exported in Python. All consistently return structured `InteractionResult` dictionaries with `ui_changes`.
-2. **`navigation_tools.py`** (5 tools):
+   - `mouse(action, x, y, end_x, end_y, button, duration_ms, dx, dy, coordinate_space, pid)` and `keyboard(action, text, keys, x, y, pid)` replace the 8 separate raw input schemas on FastMCP while keeping `click`, `double_click`, `right_click`, `hover`, `drag`, `scroll`, `type_text`, and `key_combination` exported in Python. All consistently return structured `InteractionResult` dictionaries with `ui_changes`.
+2. **`navigation_tools.py`** (4 tools; `watch_ui_events` kept as internal/Python export):
    - `inspect_ui_tree(pid, max_depth, include_raw_tree, query, role_filter)`: Returns a compact functional `hierarchy`, `tree_generation`, and collapsed 1D `interactive_elements` list by default (`include_raw_tree=True` opts into full raw nodes), with search filtering.
    - `interact_with_node(target, action, text, value, role, node_id, pid, settle_timeout_ms, ...)`: Core semantic-first dispatcher (`target` primary, `node_id` deprecated alias, `Literal` action enum, Playwright-style `role` filter, stale-ID identity rebinding, closest-match error hints) with event-driven settlement and structured `ui_changes` diffs.
    - `wait_for_element(target, role, state, timeout_ms, poll_interval_ms, pid)`: Polls until `present`/`gone`/`enabled`/`checked`/`focused` (crash-aware).
    - `batch_actions(actions, pid)`: Executes typed `BatchActionStep` sequences atomically with optional per-step `"role"` filtering, step-by-step + net delta tracking, structured `error_code`/`recovery_hint` on errors, and automatic `batch_failure.png` trace capture on live failures.
-   - `watch_ui_events(timeout_ms, pid)`: Streams accessibility events directly from AT-SPI2 D-Bus to track asynchronous UI changes.
 3. **`preset_tools.py`** (1 tool):
    - `preset_workflow(action, name, description, steps, pid)`: Manages and executes reusable multi-step interaction macro presets (`list`, `run`, `view`, `save`, `delete`), auto-normalizing positional node IDs (`b1`) to semantic `target` + `role` locators on save.
 4. **`visual_tools.py`** (1 tool):

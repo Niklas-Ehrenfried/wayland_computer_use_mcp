@@ -29,7 +29,7 @@ You must prioritize navigation tools in this strict order:
 * If `launch_app` returns `status="exited_early"`, read the embedded `logs` / `traceback` and `recovery_hint` directly instead of calling `inspect_ui_tree`.
 * Use `list_managed_apps` to verify active process sessions (which automatically prunes dead or externally closed processes).
 * After any interaction event, check the tool response metadata for an execution traceback stream or structured `error_code` / `recovery_hint`. If a Python runtime exception or crash occurs, immediately read the emitted log context, locate the bug in the repository files, and relaunch.
-* Use `watch_ui_events` to monitor real-time AT-SPI2 D-Bus accessibility signals (`Object:StateChanged`, `ChildrenChanged`, `TextChanged`, `Window:Activate`) when awaiting asynchronous UI background operations.
+* Wait for asynchronous background UI state transitions deterministically with `wait_for_element(target, state=...)` (event settlement inside interactions runs automatically via `AtspiEventListener`).
 * Use `preset_workflow` to inspect, create, or replay standard testing and interaction routines.
 
 ## ─── ANTI-PATTERNS (WHAT NOT TO DO) ───

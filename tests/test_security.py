@@ -216,3 +216,25 @@ def test_isolated_blackbox_allows_canvas_without_geometry(monkeypatch):
 
     global_portal_session._verify_preconditions()
     assert global_clamper.dimensions == (1280, 800)
+
+
+def test_human_takeover_pause_file_works_in_virtual_mode(tmp_path, monkeypatch):
+    """Creating WAYLAND_MCP_PAUSE_FILE or takeover.pause pauses even virtual sessions."""
+    from wayland_computer_use_mcp.tools.process_tools import get_session_status
+
+    pause_file = tmp_path / "takeover.pause"
+    monkeypatch.setenv("WAYLAND_MCP_PAUSE_FILE", str(pause_file))
+    monkeypatch.setattr(get_config(), "display_mode", "virtual")
+
+    manager = UserPreemptionManager(cooldown_seconds=0.05, max_wait_seconds=0.1)
+    assert manager.takeover_pause_path() == pause_file
+
+    manager.check_preemption(max_wait=0.05)
+    pause_file.write_text("paused by user\n", encoding="utf-8")
+    assert get_session_status()["takeover_paused"] is True
+
+    with pytest.raises(RuntimeError, match="user takeover"):
+        manager.check_preemption(max_wait=0.06)
+
+    pause_file.unlink()
+    manager.check_preemption(max_wait=0.05)

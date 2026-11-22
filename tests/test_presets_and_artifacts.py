@@ -84,6 +84,15 @@ def test_artifacts_directory_markers_xdg_and_readonly_fallback(tmp_path, monkeyp
         "frame_5.png",
     ]
 
+    # Config-driven defaults when max_files / max_age_hours are omitted
+    from wayland_computer_use_mcp.config import get_config
+
+    cfg = get_config()
+    monkeypatch.setattr(cfg, "max_screenshots", 2)
+    monkeypatch.setattr(cfg, "artifact_ttl_hours", 0.0)
+    assert prune_artifacts("screenshots") == 1
+    assert sorted(p.name for p in prune_dir.iterdir()) == ["frame_4.png", "frame_5.png"]
+
 
 def test_presets_lifecycle_validation_and_traversal_guard(tmp_path, monkeypatch):
     presets_dir = tmp_path / "presets"

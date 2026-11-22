@@ -380,7 +380,12 @@ def test_portal_session_close_and_frame_child_bounds(monkeypatch):
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
     cfg = get_config()
     prev_mock = cfg.mock_mode
+    prev_mode = cfg.display_mode
+    prev_lazy = cfg.lazy_portal
     cfg.mock_mode = False
+    cfg.display_mode = "live"
+    cfg.lazy_portal = False
+    monkeypatch.setattr(s2, "_ensure_host_portal_ready", lambda: None)
     monkeypatch.setattr(s2, "check_active_app", lambda: None)
     monkeypatch.setattr(
         "wayland_computer_use_mcp.compositors.query_window_geometry", lambda **kw: None
@@ -404,6 +409,8 @@ def test_portal_session_close_and_frame_child_bounds(monkeypatch):
         assert global_clamper.dimensions == (900, 700)
     finally:
         cfg.mock_mode = prev_mock
+        cfg.display_mode = prev_mode
+        cfg.lazy_portal = prev_lazy
         global_clamper.set_bounds(*prev_dims)
         global_geometry_detector.last_dimensions, global_geometry_detector.last_position = prev_last
 
@@ -438,3 +445,43 @@ def test_per_pid_window_session_state_isolation():
 
     global_portal_session.clear_pid_state(1002)
     assert global_portal_session.get_pid_state(1002) is None
+
+
+def test_hidpi_physical_coordinate_scaling(monkeypatch):
+    """HiDPI window_scale converts coordinate_space='physical' into logical compositor space."""
+    from unittest.mock import MagicMock
+
+    from wayland_computer_use_mcp.tools.input_tools import mouse
+    from wayland_computer_use_mcp.tools.process_tools import get_session_status
+
+    cfg = get_config()
+    monkeypatch.setattr(cfg, "mock_mode", True)
+
+    sink = MagicMock()
+    sink.has_absolute_pointer = True
+    monkeypatch.setattr(global_portal_session._mock, "get_input_sink", lambda: sink)
+
+    prev_scale = global_portal_session.window_scale
+    prev_dims = global_clamper.dimensions
+    prev_pid = global_portal_session.target_pid
+    try:
+        global_portal_session.target_pid = 2001
+        global_portal_session.window_scale = 1.5
+        global_portal_session.target_pid = 2002
+        assert global_portal_session.window_scale == 1.0
+        global_portal_session.target_pid = 2001
+        assert global_portal_session.window_scale == 1.5
+
+        global_clamper.set_bounds(1000, 800)
+        res = mouse(action="click", x=300, y=150, coordinate_space="physical")
+        assert "(200, 100)" in res["result"]
+        assert get_session_status()["window_scale"] == 1.5
+
+        with pytest.raises(ValueError, match="Unknown coordinate_space"):
+            mouse(action="click", x=10, y=10, coordinate_space="screen")  # type: ignore[arg-type]
+    finally:
+        global_portal_session.clear_pid_state(2001)
+        global_portal_session.clear_pid_state(2002)
+        global_portal_session.target_pid = prev_pid
+        global_portal_session.window_scale = prev_scale
+        global_clamper.set_bounds(*prev_dims)
